@@ -76,7 +76,8 @@ class TestEvalActor:
 
 
 def main():
-    data_path = "/home/tiger/data/swe_agent/swe_bench_verified.parquet"
+    ray.init()
+    data_path = "/home/tiger/data/swe_agent/swe_rebench_filtered.parquet"
     # data_path = "/home/tiger/data/swe_agent/r2e_gym_subset.parquet"
     dataset = load_dataset("parquet", data_files=data_path, split="train")
     samples = dataset.to_list()
