@@ -16,6 +16,7 @@ from swerex.runtime.abstract import (
 
 from uni_agent.async_logging import get_logger
 from uni_agent.deployment import DeployConfig
+from uni_agent.skills.manager import SkillsManager
 from uni_agent.tools.base import AbstractTool
 from uni_agent.utils import auto_await
 
@@ -103,6 +104,43 @@ class AgentEnv:
     async def copy_to_container(self, src: Path, tgt: Path) -> None:
         await self.deployment.runtime.execute(Command(command=["mkdir", "-p", str(tgt.parent)]))
         await self.deployment.runtime.upload(UploadRequest(source_path=str(src), target_path=str(tgt)))
+
+    @auto_await
+    async def install_skills(self, skills_manager: "SkillsManager") -> None:
+        """Resolve each skill's runtime path and (if needed) copy it in.
+
+        Mutates ``skills_manager.runtime_paths`` so the subsequent
+        ``build_manifest`` call renders the right ``<location>`` for each
+        skill:
+
+        - **Host-style runtime** (``HostDeployment`` / ``LocalNativeDeployment``):
+          skills are read in place from their host ``source_dir``; no copy.
+        - **Container runtime** (everything else): each skill directory is
+          uploaded to ``/opt/uni-agent/skills/<name>``.
+        """
+        from uni_agent.deployment.host.deployment import HostDeployment
+
+        host_types: tuple[type, ...] = (HostDeployment,)
+        try:
+            from uni_agent.deployment.local_native.deployment import LocalNativeDeployment
+
+            host_types = host_types + (LocalNativeDeployment,)
+        except ImportError:
+            pass
+
+        if isinstance(self.deployment, host_types):
+            for skill in skills_manager.skills:
+                skills_manager.runtime_paths[skill.name] = skill.source_dir
+            names = "\n".join(s.name for s in skills_manager.skills)
+            self.logger.info(f"Host runtime: {len(skills_manager.skills)} skill(s) read in place, no copy\n{names}")
+            return
+
+        for skill in skills_manager.skills:
+            tgt = Path("/opt/uni-agent/skills") / skill.name
+            await self.copy_to_container(src=skill.source_dir, tgt=tgt)
+            skills_manager.runtime_paths[skill.name] = tgt
+            self.logger.info(f"Skill {skill.name} installed at {tgt}")
+        self.logger.info(f"Installed {len(skills_manager.skills)} skill(s) into runtime")
 
     @auto_await
     async def close(self) -> None:

@@ -3,15 +3,7 @@ import uuid
 from functools import cached_property
 from typing import Any
 
-from uni_agent.utils import get_event_loop
-from verl.utils.chat_template import apply_chat_template
-from verl.utils.profiler import simple_timer
-from verl.utils.tokenizer import normalize_token_ids
-
-try:
-    from openai import AsyncOpenAI
-except ImportError:  # pragma: no cover - handled at runtime
-    AsyncOpenAI = None
+from uni_agent.utils import get_event_loop, simple_timer
 
 
 class MaxTokenExceededError(Exception):
@@ -42,6 +34,8 @@ class AgentChatModel:
         self.tools_schemas = tools_schemas
 
     async def prepare_rollout_cache(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        from verl.utils.tokenizer import normalize_token_ids
+
         prompt_ids = await self.loop.run_in_executor(
             None,
             lambda: self.tokenizer.apply_chat_template(
@@ -139,6 +133,9 @@ class AgentChatModel:
         return response_str, rollout_cache, generation_info
 
     async def _get_new_message_ids(self, new_messages: list[dict[str, Any]]) -> list[int]:
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import normalize_token_ids
+
         tokenized_prompt = await self.loop.run_in_executor(
             None,
             lambda: apply_chat_template(
@@ -152,6 +149,9 @@ class AgentChatModel:
 
     @cached_property
     def message_boundary_tokens(self) -> list[int]:
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import normalize_token_ids
+
         dummy_history = [
             {"role": "user", "content": "dummy user"},
             {"role": "assistant", "content": "dummy assistant"},
@@ -221,10 +221,9 @@ class OpenAICompatibleChatModel:
             self.timeout = 300
         self.base_url = self.base_url.rstrip("/")
         self.loop = get_event_loop()
-        if AsyncOpenAI is None:
-            raise ImportError(
-                "openai is required for OpenAICompatibleChatModel. Please install it with `pip install openai`."
-            )
+
+        from openai import AsyncOpenAI
+
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
 
     def set_tools_schemas(self, tools_schemas: list[dict]) -> None:
@@ -279,21 +278,47 @@ class OpenAICompatibleChatModel:
             normalized_messages.append(normalized_message)
         return normalized_messages
 
+    # OpenAI ChatCompletion top-level sampling fields. Keys not in this set
+    # are forwarded via ``extra_body`` so vendor extensions (top_k,
+    # repetition_penalty, ...) still reach vLLM/SGLang-style endpoints
+    # without 400-ing real OpenAI for unknown top-level args.
+    _OPENAI_TOP_LEVEL_SAMPLING_FIELDS: frozenset[str] = frozenset(
+        {
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "max_tokens",
+            "max_completion_tokens",
+            "stop",
+            "n",
+            "seed",
+            "logprobs",
+            "top_logprobs",
+            "logit_bias",
+            "user",
+        }
+    )
+
     async def query(
         self,
         messages: list[dict[str, str]],
         rollout_cache: dict[str, Any] | None,
         **kwargs,
     ) -> list[dict] | dict:
-        sampling_params = kwargs.get("sampling_params", self.sampling_params)
+        sampling_params = kwargs.get("sampling_params", self.sampling_params) or {}
         api_messages = self._normalize_messages_for_api(rollout_cache["extra_fields"]["api_messages"])
+
+        top_level = {k: v for k, v in sampling_params.items() if k in self._OPENAI_TOP_LEVEL_SAMPLING_FIELDS}
+        extra_body = {k: v for k, v in sampling_params.items() if k not in self._OPENAI_TOP_LEVEL_SAMPLING_FIELDS}
 
         with simple_timer("generate_sequences", rollout_cache["metrics"]):
             chat_completion = await self.client.chat.completions.create(
                 model=self.model_name,
                 messages=api_messages,
                 tools=self.tools_schemas,
-                temperature=sampling_params.get("temperature", 0.0),
+                extra_body=extra_body or None,
+                **top_level,
             )
 
         response_message = chat_completion.choices[0].message

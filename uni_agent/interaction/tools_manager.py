@@ -4,8 +4,12 @@ import shlex
 from pydantic import BaseModel, ConfigDict
 
 from uni_agent.interaction.tool_parser import FunctionCallFormatError, get_tool_parser
+from uni_agent.interaction.tool_schemas import (
+    OpenAIFunctionCallSchema,
+    OpenAIFunctionToolCall,
+    OpenAIFunctionToolSchema,
+)
 from uni_agent.tools import ToolConfig
-from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionToolCall, OpenAIFunctionToolSchema
 
 
 class ToolsManagerConfig(BaseModel):
@@ -29,7 +33,7 @@ class ToolsManager:
     async def parse_action(
         self,
         model_output: str,
-    ) -> dict:
+    ) -> tuple[str, list[OpenAIFunctionToolCall]]:
         tools = [OpenAIFunctionToolSchema(**schema) for schema in self.tools_schemas]
         content, tool_calls = self._tool_parser.extract_tool_calls(model_output, tools)
 
