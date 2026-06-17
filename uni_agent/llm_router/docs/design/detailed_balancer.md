@@ -59,7 +59,7 @@ VeRL `RequestLoadBalancer` 要求 Balancer 实现 6 个接口：
 | `add_servers` | `(servers: dict) -> None` | 两处同步：`_servers`、`_provider` replica 注册 |
 | `remove_servers` | `(server_ids: list) -> None` | 两处同步（反向移除） |
 | `get_all_servers` | `() -> list[str]` | 返回 `list(self._servers.keys())` |
-| `get_status` | `() -> dict` | **返回 `{}`**（VeRL 无任何调用方消费此返回值） |
+| `get_status` | `() -> dict` | 返回构造与路由状态：`servers` / `provider` / `strategies` / `route_calls`（用于跨远端边界校验构造流程） |
 
 > `@ray.remote` 使 Balancer 成为全局单 actor，多个 AgentLoopWorker 共享同一实例。
 
@@ -261,7 +261,7 @@ flowchart TD
 |---|---|---|---|---|
 | `release_server` | `"s0"` | `None`（no-op） | `"s999"`（不存在） | `None`（no-op） |
 | `get_all_servers` | 无 | `list[str]` | pool 为空时 | `[]` |
-| `get_status` | 无 | `{}` | 任意 | `{}` |
+| `get_status` | 无 | `{servers, provider, strategies, route_calls}` | 任意 | 同左（无异常分支） |
 
 ### 5.2 功能测试
 
@@ -322,5 +322,5 @@ flowchart TD
    - **register / unregister 签名**：`add_servers` / `remove_servers` 两处同步里调 provider 的方法签名待定。
 
    > collector 激活、store 存储结构与 ttl、per-request KV cache 查询接口、`collector_names` 汇总等 facade 内部实现，均属 collectors 模块详细设计，不在本文档范围。
-2. **`get_status` 结构化观测**：当前返回 `{}`；后续按真实需求定义 `TypedDict`。
+2. **`get_status` 字段演进**：当前返回 `servers` / `provider` / `strategies` / `route_calls`；字段集合随真实观测需求扩展（必要时收敛为 `TypedDict`）。
 3. **`release_server` 的未来语义**：若引入 sticky/限流等策略，需在此方法挂钩扩展。
