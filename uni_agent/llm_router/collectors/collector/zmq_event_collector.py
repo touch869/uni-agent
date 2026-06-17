@@ -59,7 +59,7 @@ class ZMQEventCollector(EventCollector):
         # live in the static CollectorConfig. Hardcoded placeholder for bring-up;
         # real injection is a collectors-module design item.
         kv_event_address: dict[str, list[str]] = {
-            "placeholder": ["127.0.0.1:5555", "127.0.0.1:5556"],
+            "127.0.0.1:8000": ["127.0.0.1:5555", "127.0.0.1:5556"],
         }
         self._sub_endpoints: dict[str, str] = {}
         self._replay_endpoints: dict[str, str] = {}
