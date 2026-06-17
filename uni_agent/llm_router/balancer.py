@@ -12,11 +12,14 @@ Protocol (6 methods) via structural subtyping.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from uni_agent.llm_router.collectors import RouteDataProvider
 from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
+
+logger = logging.getLogger(__name__)
 
 
 class KVCAwareBalancer:
@@ -81,6 +84,10 @@ class KVCAwareBalancer:
         if not ranking:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
+        logger.info(
+            "[KVCAwareBalancer] request=%s routed to server=%s (ranking=%s, pool=%s)",
+            request_id, server_id, ranking, list(self._servers),
+        )
         return server_id, self._servers[server_id]
 
     def add_servers(self, servers: dict[str, Any]) -> None:
