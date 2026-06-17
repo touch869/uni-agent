@@ -36,6 +36,13 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.multi_turn.max_assistant_turns = args.max_turns
     config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
 
+    # Router config (optional): enable the KVCAware llm-router via plugin_extension.
+    # When set, VeRL loads the YAML (router_class) and instantiates KVCAwareBalancer
+    # as the rollout load balancer. Unset = VeRL built-in router (global_sticky_inflight).
+    if args.router_config_path:
+        config.actor_rollout_ref.rollout.router.router_strategy = "plugin_extension"
+        config.actor_rollout_ref.rollout.router.router_config_path = args.router_config_path
+
     # Validation / sampling kwargs
     config.actor_rollout_ref.rollout.temperature = args.temperature
     config.actor_rollout_ref.rollout.top_p = args.top_p
@@ -141,6 +148,18 @@ def main():
         type=str,
         default="examples/agent_interaction/agent_config.yaml",
         help="Path to the agent loop configuration YAML.",
+    )
+    parser.add_argument(
+        "--router-config-path",
+        type=str,
+        default=None,
+        help=(
+            "Router config YAML. If set, enables the KVCAware llm-router "
+            "(router_strategy=plugin_extension); VeRL loads the YAML's router_class "
+            "and instantiates KVCAwareBalancer as the rollout load balancer. "
+            "Default None = VeRL built-in router (global_sticky_inflight). "
+            "e.g. pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
+        ),
     )
 
     # Inference parameters
