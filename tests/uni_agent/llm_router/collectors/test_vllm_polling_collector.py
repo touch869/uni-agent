@@ -29,7 +29,7 @@ import os
 
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-4B")
 VLLM_HOST = os.environ.get("VLLM_HOST", "127.0.0.1")
-VLLM_PORT = int(os.environ.get("VLLM_PORT", "8100"))
+VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
 NODE_ID = f"{VLLM_HOST}:{VLLM_PORT}"
 
 
@@ -39,20 +39,22 @@ class _CollectorConfigMock:
     """Minimal config object matching PollingCollector's expected interface.
 
     PollingCollector.__init__ reads:
-      - config.retry_interval  (float, seconds between polls)
-      - config.timeout         (float, HTTP request timeout)
-      - config.server_address  (list[str], each is "ip:port")
+      - config.http_polling["polling_interval"]  (float, seconds between polls)
+      - config.http_polling["http_timeout"]      (float, HTTP request timeout)
+
+    NOTE: server_address is currently hardcoded in PollingCollector.__init__
+    as ["127.0.0.1:8000"] — tests must align VLLM_PORT accordingly.
     """
 
     def __init__(
         self,
-        server_address: list[str],
-        retry_interval: float = 2.0,
-        timeout: float = 10.0,
+        polling_interval: float = 2.0,
+        http_timeout: float = 10.0,
     ) -> None:
-        self.server_address = server_address
-        self.retry_interval = retry_interval
-        self.timeout = timeout
+        self.http_polling = {
+            "polling_interval": polling_interval,
+            "http_timeout": http_timeout,
+        }
 
 
 # ── Fixture: launch and teardown real vLLM service ───────────────────────
@@ -159,11 +161,11 @@ class TestVLLMPollingCollectorWithRealService:
             MetricsStore.get(node_id, MetricKey.NUM_REQUESTS_WAITING) returns an int.
             MetricsStore.all_ids() contains the node_id.
         """
-        # 1. Build config with the live vLLM address
+        # 1. Build config — server_address is hardcoded in PollingCollector as
+        # ["127.0.0.1:8000"], so VLLM_PORT must be 8000.
         config = _CollectorConfigMock(
-            server_address=[vllm_service],
-            retry_interval=2.0,   # poll every 2s
-            timeout=10.0,
+            polling_interval=2.0,   # poll every 2s
+            http_timeout=10.0,
         )
 
         # 2. Create collector and store
@@ -174,7 +176,7 @@ class TestVLLMPollingCollectorWithRealService:
         async def _run_poll():
             collector.start(store)
             # Wait for at least one polling cycle (interval + margin)
-            await asyncio.sleep(config.retry_interval + 3.0)
+            await asyncio.sleep(config.http_polling["polling_interval"] + 3.0)
             collector.stop()
 
         asyncio.run(_run_poll())
@@ -214,9 +216,8 @@ class TestVLLMPollingCollectorWithRealService:
             num_requests_waiting >= 0
         """
         config = _CollectorConfigMock(
-            server_address=[vllm_service],
-            retry_interval=2.0,
-            timeout=10.0,
+            polling_interval=2.0,
+            http_timeout=10.0,
         )
 
         collector = VLLMPollingCollector(config)
@@ -224,7 +225,7 @@ class TestVLLMPollingCollectorWithRealService:
 
         async def _run_poll():
             collector.start(store)
-            await asyncio.sleep(config.retry_interval + 3.0)
+            await asyncio.sleep(config.http_polling["polling_interval"] + 3.0)
             collector.stop()
 
         asyncio.run(_run_poll())
@@ -246,9 +247,8 @@ class TestVLLMPollingCollectorWithRealService:
             The node dict contains kv_cache_usage_perc, num_requests_running, num_requests_waiting.
         """
         config = _CollectorConfigMock(
-            server_address=[vllm_service],
-            retry_interval=2.0,
-            timeout=10.0,
+            polling_interval=2.0,
+            http_timeout=10.0,
         )
 
         collector = VLLMPollingCollector(config)
@@ -256,7 +256,7 @@ class TestVLLMPollingCollectorWithRealService:
 
         async def _run_poll():
             collector.start(store)
-            await asyncio.sleep(config.retry_interval + 3.0)
+            await asyncio.sleep(config.http_polling["polling_interval"] + 3.0)
             collector.stop()
 
         asyncio.run(_run_poll())
@@ -283,9 +283,8 @@ class TestVLLMPollingCollectorWithRealService:
             After 3 polling cycles, MetricsStore contains data and values are reasonable.
         """
         config = _CollectorConfigMock(
-            server_address=[vllm_service],
-            retry_interval=2.0,
-            timeout=10.0,
+            polling_interval=2.0,
+            http_timeout=10.0,
         )
 
         collector = VLLMPollingCollector(config)
@@ -294,7 +293,7 @@ class TestVLLMPollingCollectorWithRealService:
         async def _run_poll():
             collector.start(store)
             # Wait for 3 polling cycles
-            await asyncio.sleep(config.retry_interval * 3 + 2.0)
+            await asyncio.sleep(config.http_polling["polling_interval"] * 3 + 2.0)
             collector.stop()
 
         asyncio.run(_run_poll())
