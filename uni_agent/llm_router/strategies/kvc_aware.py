@@ -11,7 +11,7 @@ from uni_agent.llm_router.strategies.load_score import DEFAULT_LOAD_WEIGHTS, loa
 from uni_agent.llm_router.strategies.registry import StrategyRegistry
 
 if TYPE_CHECKING:
-    from uni_agent.llm_router.collectors.provider import RouteDataProvider
+    from uni_agent.llm_router.store import DataStore
     from uni_agent.llm_router.strategies.base import ReplicaInfo
 
 logger = get_router_logger("kvc-aware-strategy")
@@ -90,7 +90,7 @@ class KVCacheAwareStrategy:
             raise StrategyError("set_capacity() must be called before routing")
         return load_normalized(kv_usage, running, waiting, max_num_seqs=self._max_num_seqs, weights=self.load_weights)
 
-    def _resolve_kv_usage(self, provider: RouteDataProvider, replica_id: str, m: dict) -> float:
+    def _resolve_kv_usage(self, store: DataStore, replica_id: str, m: dict) -> float:
         """KV-cache occupancy for the load formula.
 
         Prefers **retained occupancy** (``retained_blocks / num_gpu_blocks``),
@@ -98,20 +98,43 @@ class KVCacheAwareStrategy:
         distinct prefixes accumulate; falls back to ``kv_cache_usage_perc``
         (running-only) when retained data is unavailable.
         """
-        retained_occ = provider.get_retained_occupancy(replica_id)
+        retained_occ = store.get_retained_occupancy(replica_id)
         if retained_occ is not None:
             return retained_occ
         return m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
 
-    def is_overloaded(self, provider: RouteDataProvider, replica: ReplicaInfo) -> bool:
-        """Return True if ``replica`` is overloaded (``load > load_threshold``)."""
-        m = provider.get_metrics(replica.replica_id)
-        kv_usage = self._resolve_kv_usage(provider, replica.replica_id, m)
+    def is_overloaded(
+        self,
+        store: DataStore,
+        replica: ReplicaInfo,
+    ) -> bool:
+        """Return True if ``replica`` is overloaded (``load > load_threshold``).
+
+        Used only by the sticky short-circuit to decide whether to send a
+        returning session back to its bound replica. Combined scoring never
+        consults overload.
+        """
+        m = store.get_metrics(replica.replica_id)
+        kv_usage = self._resolve_kv_usage(store, replica.replica_id, m)
         running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
         waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
         return self._compute_load(kv_usage, running, waiting) > self.load_threshold
 
-    def _sticky_shortcut(self, provider, replicas, request_id, sticky_table):
+    def _sticky_shortcut(
+        self,
+        store: DataStore,
+        replicas: list[ReplicaInfo],
+        request_id: str | None,
+        sticky_table: Any,
+    ) -> list[float] | None:
+        """Return a pre-built score list if a sticky replica should win, else None.
+
+        Sticky replica wins when: ``request_id``/``sticky_table`` are provided,
+        the bound replica is present in ``replicas``, and it is NOT overloaded.
+        On win, returns a list with ``STICKY_TOP_SCORE`` at the bound replica's
+        index and ``0.0`` elsewhere. On miss / overload / absence, returns
+        ``None`` so the caller falls through to combined scoring.
+        """
         if not request_id or sticky_table is None:
             return None
         sticky_id = sticky_table.get(request_id)
@@ -119,8 +142,8 @@ class KVCacheAwareStrategy:
             return None
         for idx, replica in enumerate(replicas):
             if replica.replica_id == sticky_id:
-                m = provider.get_metrics(replica.replica_id)
-                kv_usage = self._resolve_kv_usage(provider, replica.replica_id, m)
+                m = store.get_metrics(replica.replica_id)
+                kv_usage = self._resolve_kv_usage(store, replica.replica_id, m)
                 running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
                 waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
                 load = self._compute_load(kv_usage, running, waiting)
@@ -134,7 +157,14 @@ class KVCacheAwareStrategy:
         logger.info(f"score(): sticky replica={sticky_id} not in pool, fallback to combined scoring")
         return None
 
-    def score(self, prompt_ids, provider, replicas, request_id=None, sticky_table=None):
+    def score(
+        self,
+        prompt_ids: list[int] | None,
+        store: DataStore,
+        replicas: list[ReplicaInfo],
+        request_id: str | None = None,
+        sticky_table: Any = None,
+    ) -> list[float]:
         """Score each replica. Larger is better.
 
         S = α·S_cache + (1-α)·S_load
@@ -143,20 +173,26 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"replicas must be a list, got {type(replicas).__name__}")
         if not replicas:
             return []
-        shortcut = self._sticky_shortcut(provider, replicas, request_id, sticky_table)
+        # Sticky short-circuit: bound, non-overloaded replica wins outright.
+        shortcut = self._sticky_shortcut(store, replicas, request_id, sticky_table)
         if shortcut is not None:
             return shortcut
         effective_prompt_ids = prompt_ids or []
-        gpu_hit_pct = provider.get_gpu_prefix_hit_rate(effective_prompt_ids)
+
+        # GPU prefix hit is the same prompt for every replica — query once.
+        # get_gpu_prefix_hit_rate returns {replica_id: 0-100}; _cache_score
+        # scales each replica's value to 0-1.
+        gpu_hit_pct = store.get_gpu_prefix_hit_rate(effective_prompt_ids)
+
         result = []
         for replica in replicas:
-            m = provider.get_metrics(replica.replica_id)
-            kv_usage = self._resolve_kv_usage(provider, replica.replica_id, m)
+            m = store.get_metrics(replica.replica_id)
+            kv_usage = self._resolve_kv_usage(store, replica.replica_id, m)
             running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
             waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
             load = self._compute_load(kv_usage, running, waiting)
             s_load = 1.0 - load
-            s_cache = self._cache_score(provider, replica, effective_prompt_ids, gpu_hit_pct)
+            s_cache = self._cache_score(store, replica, effective_prompt_ids, gpu_hit_pct)
             score = self.alpha * s_cache + (1 - self.alpha) * s_load
             result.append(score)
             gpu_hit = gpu_hit_pct.get(replica.replica_id, 0) / 100.0
@@ -169,10 +205,27 @@ class KVCacheAwareStrategy:
         logger.info(f"score(): COMBINED scores: {scores_str}")
         return result
 
-    def _cache_score(self, provider, replica, prompt_ids, gpu_hit_pct):
+    def _cache_score(
+        self,
+        store: DataStore,
+        replica: ReplicaInfo,
+        prompt_ids: list[int],
+        gpu_hit_pct: dict[str, float],
+    ) -> float:
+        """Three-layer weighted prefix-cache hit score ∈ [0, 1].
+
+            S_cache = w_gpu·gpu_hit + w_cpu·cpu_hit + w_ssd·ssd_hit
+
+        ``gpu_hit`` comes from ``get_gpu_prefix_hit_rate`` (0-100, scaled to
+        0-1); ``cpu_hit``/``ssd_hit`` come from ``get_tier_prefix_hit_rate``
+        (``None`` → 0.0, e.g. when the mooncake tier collector is not yet
+        implemented). Weights come from ``self.layer_weights`` and are
+        validated to sum to 1.0 at construction, so the result is already in
+        [0, 1] with no extra normalization.
+        """
         gpu_hit = gpu_hit_pct.get(replica.replica_id, 0) / 100.0
-        cpu_hit = provider.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, "cpu") or 0.0
-        ssd_hit = provider.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, "ssd") or 0.0
+        cpu_hit = store.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, "cpu") or 0.0
+        ssd_hit = store.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, "ssd") or 0.0
         w = self.layer_weights
         return w["gpu"] * gpu_hit + w["cpu"] * cpu_hit + w["ssd"] * ssd_hit
 

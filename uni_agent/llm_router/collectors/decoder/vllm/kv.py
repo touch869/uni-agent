@@ -1,150 +1,167 @@
 """VLLMKVDecoder — vLLM KV-cache event decoder.
 
-Decodes msgpack payloads from ZMQ, applies KV cache events to
-KVCacheStore via dispatch table.
+Decodes msgpack payloads from ZMQ and returns structured update commands.
+Store writes are handled by Collector via DataStore.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
+from typing import Any
 
 import msgpack
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
 from uni_agent.llm_router.collectors.decoder.vllm.kv_event import KVCacheEvent
-from uni_agent.llm_router.hash import compute_hash
+from uni_agent.llm_router.collectors.updates import KVCacheUpdate
 from uni_agent.llm_router.logging import get_router_logger
-from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
+from uni_agent.llm_router.utils.hash import compute_hash
 
 logger = get_router_logger("vllm-kv")
 
-# Log a kv-events tally (events + blocks by type) every N applied events.
-# Lets us see BlockStored/BlockRemoved flow — esp. whether mc-off groups (no
-# mooncake → no kv-events emission) get any events at all.
-_KV_EVENT_LOG_EVERY = 500
-
 
 class VLLMKVDecoder(Decoder):
-    """vLLM KV-cache decoder — msgpack payload → KVCacheStore updates.
+    """vLLM KV-cache decoder — msgpack payload → KVCacheUpdate.
 
-    Event dispatch uses a ``_DISPATCH`` table mapping ``event_type``
-    to handler methods — no if/else chain needed.
+    Parses msgpack payloads and returns structured update commands.
 
     Attributes:
         remote_to_local_block_hash: Mapping from vLLM remote block_hash
-            to locally-computed prefix hash (str).  Used in
-            _handle_stored for chained hash computation.
+            to locally-computed prefix hash (str).  Used for chained
+            hash computation.
+        _block_size: Learned block size from first event.
     """
 
-    store_cls = KVCacheStore
-
-    # event_type → handler method name
-    _DISPATCH: dict[str, str] = {
-        "stored": "_handle_stored",
-        "removed": "_handle_removed",
-        "clear": "_handle_clear",
-    }
-
     def __init__(self) -> None:
-        self._store = self.store_cls.default()
         self.remote_to_local_block_hash: dict[str, str] = {}
-        # kv-event tallies for periodic summary logging.
-        self._event_counts: dict[str, int] = defaultdict(int)
-        self._block_counts: dict[str, int] = defaultdict(int)
-        self._last_logged_total = 0
+        self._block_size: int | None = None
 
-    def decode(self, raw_data: bytes | str, node_id: str) -> None:
-        """Decode msgpack payload, apply events to store.
+    def decode(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
+        """Decode msgpack payload and return structured update command.
+
+        Handles both single event (real-time) and multiple events (replay):
+          - Single: [timestamp, [[tag, fields...], ...]]
+          - Multiple: [[timestamp, [...]], [timestamp, [...]]]
 
         Args:
             raw_data: ZMQ payload bytes (msgpack-encoded).
-            node_id: The replica that sent this payload.
+            node_id: The endpoint that sent this payload.
+
+        Returns:
+            KVCacheUpdate with operations to apply, or None if decode failed.
         """
         # ZMQ delivers bytes; ignore string data (shouldn't happen for this decoder)
         if isinstance(raw_data, str):
             logger.debug("VLLMKVDecoder received string data, expected bytes — skipping")
-            return
+            return None
 
         try:
             raw = msgpack.unpackb(raw_data, raw=False)
-            events = KVCacheEvent.from_raw(raw, default_replica_id=node_id)
-            for event in events:
-                self._apply_event(event, default_replica_id=node_id)
-        except (msgpack.UnpackException, ValueError, TypeError) as exc:
-            logger.warning(f"Failed to decode msgpack payload from node {node_id}: {exc}")
 
-    def _apply_event(
-        self,
-        event: KVCacheEvent,
-        default_replica_id: str | None = None,
-    ) -> None:
-        """Dispatch a KVCacheEvent to the appropriate handler."""
-        handler_name = self._DISPATCH.get(event.event_type)
-        if handler_name is None:
-            logger.debug(f"Unhandled event type: {event.event_type}")
-            return
-        handler = getattr(self, handler_name)
-        replica_id = event.replica_id or default_replica_id or ""
-        n_blocks = len(getattr(event, "block_hashes", []) or [])
-        logger.debug(f"kv-event type={event.event_type} replica={replica_id} n_blocks={n_blocks}")
-        handler(event, replica_id)
+            # Determine if raw is single event or multiple events
+            # Single: [timestamp, [...]] where timestamp is int
+            # Multiple: [[timestamp, [...]], ...] where first element is list
+            if not isinstance(raw, list) or len(raw) == 0:
+                logger.warning("Unexpected msgpack format from node %s", node_id)
+                return None
+            event_payloads = raw if isinstance(raw[0], list) else [raw]
 
-        # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
-        self._event_counts[event.event_type] += 1
-        self._block_counts[event.event_type] += n_blocks
-        total = sum(self._event_counts.values())
-        if total - self._last_logged_total >= _KV_EVENT_LOG_EVERY:
-            self._last_logged_total = total
-            retained = self._store.per_replica_block_counts()
-            logger.info(
-                f"kv-events tally: events={dict(self._event_counts)} blocks={dict(self._block_counts)} "
-                f"(total_events={total}) | retained_blocks/replica={retained}"
+            # Aggregate all operations from all payloads
+            add_blocks: list[str] = []
+            remove_blocks: list[str] = []
+            clear_all = False
+            learned_block_size: int | None = None
+
+            for payload in event_payloads:
+                events = KVCacheEvent.from_raw(payload, default_node_id=node_id)
+
+                for event in events:
+                    if event.event_type == "stored":
+                        result = self._process_stored(event)
+                        if result is None:
+                            continue
+                        add_blocks.extend(result["add_blocks"])
+                        if result["block_size"] is not None:
+                            learned_block_size = result["block_size"]
+
+                    elif event.event_type == "removed":
+                        remove_blocks.extend(self._process_removed(event))
+
+                    elif event.event_type == "clear":
+                        clear_all = True
+
+                    else:
+                        raise ValueError(f"Unknow event.event_type {event.event_type}.")
+
+            return KVCacheUpdate(
+                node_id=node_id,
+                add_blocks=add_blocks,
+                remove_blocks=remove_blocks,
+                clear_all=clear_all,
+                block_size=learned_block_size,
             )
 
-    # ── Event handlers ──────────────────────────────────────────────────
+        except (msgpack.UnpackException, ValueError, TypeError) as exc:
+            logger.warning(
+                "Failed to decode msgpack payload from node %s: %s",
+                node_id,
+                exc,
+            )
+            return None
 
-    def _handle_stored(self, event: KVCacheEvent, replica_id: str) -> None:
-        """Handle BlockStored: learn block_size, compute local hashes, update store."""
-        store = self._store
+    # ── Event processors ────────────────────────────────────────────────
+
+    def _process_stored(self, event: KVCacheEvent) -> dict[str, Any] | None:
+        """Process BlockStored: compute local hashes.
+
+        Returns:
+            Dict with "add_blocks" (list[str]) and "block_size" (int | None).
+        """
         seed = 0
 
-        if store.block_size is None and event.block_size is not None:
-            store.block_size = event.block_size
+        if event.token_ids is None:
+            logger.debug("Stored event has no token_ids — skipping")
+            return None
 
-        if event.token_ids is not None:
-            local_parent_hash = seed
-            if event.parent_block_hash is not None:
-                local_parent_str = self.remote_to_local_block_hash.get(event.parent_block_hash)
-                if local_parent_str is not None:
-                    local_parent_hash = int(local_parent_str)
+        # Learn block_size from first event
+        learned_block_size = None
+        if self._block_size is None and event.block_size is not None:
+            self._block_size = event.block_size
+            learned_block_size = event.block_size
 
-            local_hashes: list[str] = []
-            for i, block_bytes in enumerate(event.token_ids):
-                if i >= len(event.block_hashes):
-                    break
-                local_hash_int = compute_hash(
-                    local_parent_hash,
-                    block_bytes,
-                    seed=seed,
-                )
-                local_hash_str = str(local_hash_int)
-                bh = event.block_hashes[i]
-                self.remote_to_local_block_hash[bh] = local_hash_str
-                local_hashes.append(local_hash_str)
-                local_parent_hash = local_hash_int  # chain
+        local_parent_hash = seed
+        if event.parent_block_hash is not None:
+            local_parent_str = self.remote_to_local_block_hash.get(event.parent_block_hash)
+            if local_parent_str is not None:
+                local_parent_hash = int(local_parent_str)
 
-            store.add_blocks(replica_id, local_hashes)
+        local_hashes: list[str] = []
+        for i, block_bytes in enumerate(event.token_ids):
+            if i >= len(event.block_hashes):
+                break
+            local_hash_int = compute_hash(
+                local_parent_hash,
+                block_bytes,
+                seed=seed,
+            )
+            local_hash_str = str(local_hash_int)
+            bh = event.block_hashes[i]
+            self.remote_to_local_block_hash[bh] = local_hash_str
+            local_hashes.append(local_hash_str)
+            local_parent_hash = local_hash_int  # chain
 
-    def _handle_removed(self, event: KVCacheEvent, replica_id: str) -> None:
-        """Handle BlockRemoved: convert remote hashes to local, remove from store."""
-        store = self._store
+        return {"add_blocks": local_hashes, "block_size": learned_block_size}
+
+    def _process_removed(self, event: KVCacheEvent) -> list[str]:
+        """Process BlockRemoved: convert remote hashes to local.
+
+        Returns:
+            List of local hashes to remove.
+        """
         local_hashes = [
             self.remote_to_local_block_hash[bh] for bh in event.block_hashes if bh in self.remote_to_local_block_hash
         ]
-        store.remove_blocks(replica_id, local_hashes)
+        # Clean up mapping
         for bh in event.block_hashes:
             self.remote_to_local_block_hash.pop(bh, None)
 
-    def _handle_clear(self, event: KVCacheEvent, replica_id: str) -> None:
-        """Handle AllBlocksCleared: clear all blocks for the replica."""
-        self._store.clear_replica(replica_id)
+        return local_hashes

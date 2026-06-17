@@ -16,9 +16,10 @@ from typing import Any
 
 import ray
 
-from uni_agent.llm_router.collectors.provider import RouteDataProvider
+from uni_agent.llm_router.collectors.provider import CollectorProvider
 from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.logging import get_router_logger
+from uni_agent.llm_router.store import DataStore
 from uni_agent.llm_router.strategies import (
     ReplicaInfo,
     StickySessionTable,
@@ -48,6 +49,7 @@ class KVCAwareBalancer:
         self._route_calls = 0
         self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
         self._init_provider()
+        self._store = DataStore()
 
     @staticmethod
     def _resolve_max_num_seqs(servers: dict[str, Any]) -> int:
@@ -65,7 +67,7 @@ class KVCAwareBalancer:
         Iterates ``self._servers``, calling ``get_server_address.remote()`` and
         ``get_kv_events_endpoints.remote()`` on each handle to dynamically
         discover the Prometheus polling addresses and ZMQ kv-event endpoints.
-        The resolved addresses are then passed to ``RouteDataProvider``, which
+        The resolved addresses are then passed to ``CollectorProvider``, which
         routes them to the appropriate collector type at creation time.
 
         Handles that are not real Ray actors (e.g. plain strings passed by
@@ -73,8 +75,6 @@ class KVCAwareBalancer:
         for those, dynamic discovery is skipped and collectors fall back to
         their configured/default endpoints.
         """
-        import ray
-
         collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
         server_addresses: dict[str, str] = {}
         kv_event_endpoints: dict[str, list[str]] = {}
@@ -100,7 +100,7 @@ class KVCAwareBalancer:
                 if endpoints is None:
                     continue
                 kv_event_endpoints[replica_id] = endpoints
-        self._provider = RouteDataProvider(
+        self._provider = CollectorProvider(
             self._config.collector,
             collection_names,
             server_addresses=server_addresses,
@@ -149,7 +149,7 @@ class KVCAwareBalancer:
         ranking = route(
             self._strategies,
             prompt_ids,
-            self._provider,
+            self._store,
             replicas,
             request_id,
             self._sticky,

@@ -595,36 +595,44 @@ class TestKVCAwareConstruction:
 class TestSetCapacity:
     def test_set_capacity_updates_max_num_seqs(self):
         strat = KVCacheAwareStrategy(
-            alpha=0.7, load_threshold=0.9,
+            alpha=0.7,
+            load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-            collector_names=["vllm_zmq"], weight=1.0,
+            collector_names=["vllm_zmq"],
+            weight=1.0,
         )
         strat.set_capacity(16)
         assert strat._max_num_seqs == 16
 
     def test_set_capacity_rejects_zero(self):
         strat = KVCacheAwareStrategy(
-            alpha=0.7, load_threshold=0.9,
+            alpha=0.7,
+            load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-            collector_names=["vllm_zmq"], weight=1.0,
+            collector_names=["vllm_zmq"],
+            weight=1.0,
         )
         with pytest.raises(StrategyError):
             strat.set_capacity(0)
 
     def test_set_capacity_rejects_negative(self):
         strat = KVCacheAwareStrategy(
-            alpha=0.7, load_threshold=0.9,
+            alpha=0.7,
+            load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-            collector_names=["vllm_zmq"], weight=1.0,
+            collector_names=["vllm_zmq"],
+            weight=1.0,
         )
         with pytest.raises(StrategyError):
             strat.set_capacity(-1)
 
     def test_compute_load_raises_before_set_capacity(self):
         strat = KVCacheAwareStrategy(
-            alpha=0.7, load_threshold=0.9,
+            alpha=0.7,
+            load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-            collector_names=["vllm_zmq"], weight=1.0,
+            collector_names=["vllm_zmq"],
+            weight=1.0,
         )
         with pytest.raises(StrategyError, match="set_capacity"):
             strat._compute_load(0.5, 0, 0)
