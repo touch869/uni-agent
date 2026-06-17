@@ -15,7 +15,8 @@ from uni_agent.llm_router.strategies import (
     StrategyRegistry,
     route,
 )
-from uni_agent.llm_router.collectors import MetricKey, RouteDataProvider
+from uni_agent.llm_router.metric_spec import MetricKey
+from uni_agent.llm_router.collectors import CollectorProvider
 from uni_agent.llm_router.strategies import ReplicaInfo
 
 __all__ = [
@@ -32,5 +33,5 @@ __all__ = [
     "route",
     "MetricKey",
     "ReplicaInfo",
-    "RouteDataProvider",
+    "CollectorProvider",
 ]
