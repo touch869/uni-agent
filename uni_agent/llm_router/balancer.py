@@ -20,6 +20,15 @@ from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
 
 logger = logging.getLogger(__name__)
+# The balancer runs as a Ray actor in its own process, where the root logger
+# has no handler/level configured by default — INFO would be swallowed. Attach
+# a StreamHandler at INFO so routing decisions reach Ray's captured log stream.
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [KVCAwareBalancer] %(message)s"))
+    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
 
 class KVCAwareBalancer:
