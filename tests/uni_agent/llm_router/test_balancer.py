@@ -4,16 +4,59 @@ Per detailed_balancer.md §5. The Balancer is a pure framework shell: it wires
 Config/Strategy/collectors, manages lifecycle, and delegates routing to
 ``route()``. The routing algorithm itself is mocked here — it lives in the
 Strategy module.
+
+These unit tests focus on the Balancer ONLY. The entire ``collectors`` module
+is replaced with a fake (via sys.modules) so the real collectors import chain
+— which pulls in heavy optional deps (pyzmq, httpx) not installed here — never
+loads. Real collectors (with zmq/httpx) are exercised in the integration-test
+env (.147).
 """
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 from omegaconf import OmegaConf
 
-from uni_agent.llm_router.balancer import KVCAwareBalancer
-from uni_agent.llm_router.collectors import RouteDataProvider
-from uni_agent.llm_router.strategies import KVCacheAwareStrategy
+
+# ── Replace the whole collectors module with a fake before importing balancer ──
+# The fake RouteDataProvider stands in for the real one; tests assert on it.
+class _FakeProvider:
+    """Stand-in for RouteDataProvider — no real collectors run.
+
+    Records lifecycle (start/stop) and exposes the query surface route() may
+    call. The provider is NOT keyed by the server pool (see balancer TODO), so
+    there is no register/unregister.
+    """
+
+    def __init__(self, collectors_config, collection_names):
+        self.collectors_config = collectors_config
+        self.collection_names = collection_names
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def get_metric(self, replica_id, key):
+        return 0.0
+
+    def get_metrics(self, replica_id):
+        return {}
+
+
+_collectors_fake = types.ModuleType("uni_agent.llm_router.collectors")
+_collectors_fake.RouteDataProvider = _FakeProvider
+sys.modules["uni_agent.llm_router.collectors"] = _collectors_fake
+
+import uni_agent.llm_router.balancer as balancer_mod  # noqa: E402
+from uni_agent.llm_router.balancer import KVCAwareBalancer  # noqa: E402
+from uni_agent.llm_router.strategies import KVCacheAwareStrategy  # noqa: E402
 
 
 def _router_config(weight: float = 1.0):
@@ -37,37 +80,6 @@ def _make_balancer(servers=None):
     return KVCAwareBalancer(servers, _router_config())
 
 
-class _RecordingProvider:
-    """Fake RouteDataProvider that records lifecycle + register/unregister calls."""
-
-    def __init__(self, config):
-        self.config = config
-        self.registered: list[str] = []
-        self.unregistered: list[str] = []
-        self.started = False
-
-    def start(self):
-        self.started = True
-
-    def register(self, replica_id):
-        self.registered.append(replica_id)
-
-    def unregister(self, replica_id):
-        self.unregistered.append(replica_id)
-
-
-def _make_balancer_with_fake_provider(monkeypatch, servers=None):
-    """Build a balancer whose provider is a ``_RecordingProvider``.
-
-    Returns ``(balancer, provider)`` so tests can assert on register/unregister.
-    """
-    import uni_agent.llm_router.balancer as balancer_mod
-
-    monkeypatch.setattr(balancer_mod, "RouteDataProvider", _RecordingProvider)
-    balancer = KVCAwareBalancer(servers or {"s0": "h0"}, _router_config())
-    return balancer, balancer._provider
-
-
 # ============================================================
 # 5.1 / construction
 # ============================================================
@@ -80,10 +92,11 @@ class TestKVCAwareBalancerConstruction:
         """
         Feature: construction wires config/provider/strategies/servers
         Description: KVCAwareBalancer({"s0": h0}, router_config)
-        Expectation: _provider is a RouteDataProvider; _strategies wired with weight
+        Expectation: _provider built and started; _strategies wired with weight
         """
         balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
-        assert isinstance(balancer._provider, RouteDataProvider)
+        assert balancer._provider.started is True
+        assert balancer._provider.collection_names == ["vllm_zmq"]
         assert len(balancer._strategies) == 1
         strat, weight = balancer._strategies[0]
         assert isinstance(strat, KVCacheAwareStrategy)
@@ -109,26 +122,14 @@ class TestKVCAwareBalancerConstruction:
         with pytest.raises(ConfigError):
             KVCAwareBalancer({"s0": "h0"}, OmegaConf.create({}))
 
-    def test_b03_construction_starts_provider(self, monkeypatch):
+    def test_b03_construction_starts_provider(self):
         """
         Feature: construction starts the provider (lifecycle)
-        Description: construct balancer with a fake provider and observe start()
+        Description: construct balancer (autouse _FakeProvider) and check start()
         Expectation: the provider's start() is invoked during __init__
         """
-        import uni_agent.llm_router.balancer as balancer_mod
-
-        started = {"called": False}
-
-        class _FakeProvider:
-            def __init__(self, config):
-                self.config = config
-
-            def start(self):
-                started["called"] = True
-
-        monkeypatch.setattr(balancer_mod, "RouteDataProvider", _FakeProvider)
-        KVCAwareBalancer({"s0": "h0"}, _router_config())
-        assert started["called"] is True
+        balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
+        assert balancer._provider.started is True
 
 
 # ============================================================
@@ -154,8 +155,11 @@ class TestTrivialMethods:
         Description: get_status() on a freshly constructed balancer
         Expectation: reports provider type, materialized strategy, pool ids, route_calls=0
         """
-        status = _make_balancer({"s0": "h0"}).get_status()
-        assert status["provider"] == "RouteDataProvider"
+        balancer = _make_balancer({"s0": "h0"})
+        status = balancer.get_status()
+        # provider is the injected _FakeProvider in unit tests; real env reports
+        # "RouteDataProvider". Assert it matches the constructed provider's type.
+        assert status["provider"] == type(balancer._provider).__name__
         assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
         assert status["servers"] == ["s0"]
         assert status["route_calls"] == 0
@@ -259,63 +263,61 @@ class TestAcquireServer:
 
 
 # ============================================================
-# add_servers / remove_servers — two-place sync
+# add_servers / remove_servers — pool mutations
+# (provider is global / not keyed by the pool, so only _servers is touched)
 # ============================================================
 
 
 class TestServerPoolMutations:
-    """B12-Bnn: add/remove keep _servers and the provider in sync."""
+    """B12-Bnn: add/remove mutate the server pool."""
 
-    def test_b12_add_servers_grows_pool_and_registers(self, monkeypatch):
+    def test_b12_add_servers_grows_pool(self):
         """
-        Feature: add_servers grows the pool and registers replicas with the provider
+        Feature: add_servers grows the pool
         Description: add_servers({"s1":h1,"s2":h2}) on a one-server balancer
-        Expectation: pool has s0/s1/s2; provider registered s1 and s2
+        Expectation: pool has s0/s1/s2
         """
-        balancer, provider = _make_balancer_with_fake_provider(monkeypatch, {"s0": "h0"})
+        balancer = _make_balancer({"s0": "h0"})
         balancer.add_servers({"s1": "h1", "s2": "h2"})
         assert set(balancer.get_all_servers()) == {"s0", "s1", "s2"}
-        assert set(provider.registered) == {"s1", "s2"}
 
-    def test_b13_add_servers_empty_dict_is_noop(self, monkeypatch):
+    def test_b13_add_servers_empty_dict_is_noop(self):
         """
         Feature: adding an empty dict changes nothing
         Description: add_servers({}) on a one-server balancer
-        Expectation: pool unchanged; provider registered nothing
+        Expectation: pool unchanged
         """
-        balancer, provider = _make_balancer_with_fake_provider(monkeypatch, {"s0": "h0"})
+        balancer = _make_balancer({"s0": "h0"})
         balancer.add_servers({})
         assert set(balancer.get_all_servers()) == {"s0"}
-        assert provider.registered == []
 
-    def test_b14_add_servers_duplicate_overwrites_handle(self, monkeypatch):
+    def test_b14_add_servers_duplicate_overwrites_handle(self):
         """
         Feature: adding an existing id overwrites its handle (bulk-add semantics)
         Description: add_servers({"s0": new}) when s0 already in pool
         Expectation: handle overwritten; no error raised
         """
-        balancer, _ = _make_balancer_with_fake_provider(monkeypatch, {"s0": "h0"})
+        balancer = _make_balancer({"s0": "h0"})
         balancer.add_servers({"s0": "h0_new"})
         assert balancer._servers["s0"] == "h0_new"
 
-    def test_b15_remove_servers_shrinks_pool_and_unregisters(self, monkeypatch):
+    def test_b15_remove_servers_shrinks_pool(self):
         """
-        Feature: remove_servers shrinks the pool and unregisters from the provider
+        Feature: remove_servers shrinks the pool
         Description: remove_servers(["s0"]) on a two-server balancer
-        Expectation: pool keeps only s1; provider unregistered s0
+        Expectation: pool keeps only s1
         """
-        balancer, provider = _make_balancer_with_fake_provider(monkeypatch, {"s0": "h0", "s1": "h1"})
+        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
         balancer.remove_servers(["s0"])
         assert set(balancer.get_all_servers()) == {"s1"}
-        assert provider.unregistered == ["s0"]
 
-    def test_b16_remove_servers_unknown_id_is_noop(self, monkeypatch):
+    def test_b16_remove_servers_unknown_id_is_noop(self):
         """
         Feature: removing an unknown id changes nothing and does not raise
         Description: remove_servers(["s999"]) on a one-server balancer
         Expectation: pool unchanged
         """
-        balancer, _ = _make_balancer_with_fake_provider(monkeypatch, {"s0": "h0"})
+        balancer = _make_balancer({"s0": "h0"})
         balancer.remove_servers(["s999"])
         assert set(balancer.get_all_servers()) == {"s0"}
 

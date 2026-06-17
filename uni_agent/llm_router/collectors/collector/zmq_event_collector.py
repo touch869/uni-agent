@@ -41,21 +41,29 @@ class ZMQEventCollector(EventCollector):
     background coroutine — all replicas subscribe concurrently.
 
     Args:
-        config: ``CollectorConfig`` — provides retry settings and
-                kv_event_address (``{replica_id: [sub_addr, replay_addr]}``).
+        config: ``CollectorConfig`` — long_connection retry params
+                (base_retry_delay / max_retry_attempts / retry_backoff_factor).
     """
 
     def __init__(self, config) -> None:
         super().__init__()
         self._topic = "kv-events"
-        self._base_retry_delay = config.retry_interval
-        self._max_retry_delay = 30.0
-        self._max_retry_attempts = config.max_retries
-        self._retry_backoff_factor = 2.0
-        # Parse kv_event_address: {replica_id: [sub_ip:port, replay_ip:port]}
+        long_conn = config.long_connection
+        self._base_retry_delay = long_conn["base_retry_delay"]
+        self._max_retry_delay = long_conn["max_retry_delay"]
+        self._max_retry_attempts = long_conn["max_retry_attempts"]
+        self._retry_backoff_factor = long_conn["retry_backoff_factor"]
+        # TODO(kv_event_address): the per-replica ZMQ endpoints
+        # {replica_id: [sub_addr, replay_addr]} are allocated dynamically when
+        # the vLLM servers start and passed down at runtime — they must NOT
+        # live in the static CollectorConfig. Hardcoded placeholder for bring-up;
+        # real injection is a collectors-module design item.
+        kv_event_address: dict[str, list[str]] = {
+            "placeholder": ["127.0.0.1:5555", "127.0.0.1:5556"],
+        }
         self._sub_endpoints: dict[str, str] = {}
         self._replay_endpoints: dict[str, str] = {}
-        for replica_id, addresses in config.kv_event_address.items():
+        for replica_id, addresses in kv_event_address.items():
             self._sub_endpoints[replica_id] = f"tcp://{addresses[0]}"
             self._replay_endpoints[replica_id] = f"tcp://{addresses[1]}"
         self._stopped = False
