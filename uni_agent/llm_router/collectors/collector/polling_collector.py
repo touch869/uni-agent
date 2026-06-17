@@ -8,6 +8,8 @@ Construction accepts a ``CollectorsConfig`` for all configuration.
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import Future
 
 from abc import ABC, abstractmethod
 
@@ -26,49 +28,71 @@ class PollingCollector(ABC):
     parsing logic.
 
     Args:
-        config: ``CollectorConfig`` — provides interval, timeout, and
-                server_address (list of ``ip:port`` strings).
+        config: ``CollectorConfig`` — http_polling params
+                (polling_interval / http_timeout).
     """
 
     def __init__(self, config) -> None:
-        self._interval = config.retry_interval
-        self._http_timeout = config.timeout
+        http_polling = config.http_polling
+        self._interval = http_polling["polling_interval"]
+        self._http_timeout = http_polling["http_timeout"]
+        # TODO(server_address): the per-replica metrics addresses (ip:port) are
+        # allocated dynamically when the vLLM servers start and passed down at
+        # runtime — they must NOT live in the static CollectorConfig.
+        # Hardcoded placeholder for bring-up; real injection is a collectors-
+        # module design item.
+        server_address = ["127.0.0.1:8000"]
         # replica_id = server_address (ip:port); each address polls its own
         # Prometheus endpoint at ``http://{address}/metrics``
         self._endpoints: dict[str, str] = {
-            addr: f"http://{addr}/metrics" for addr in config.server_address
+            addr: f"http://{addr}/metrics" for addr in server_address
         }
         self._store: MetricsStore | None = None
         self._client: httpx.AsyncClient | None = None
-        self._task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._task: Future | None = None
 
     def start(self, store: MetricsStore) -> None:
-        """Start background polling.
+        """Start background polling (synchronous).
+
+        Spins up a dedicated event loop on a daemon thread and schedules
+        ``_polling_loop`` on it. The httpx client is created inside the loop
+        thread (in ``_polling_loop``) so it binds to the right loop.
 
         Args:
             store: ``MetricsStore`` — polling results are written via
                    ``store.refresh()``.
         """
         self._store = store
-        self._client = httpx.AsyncClient(timeout=self._http_timeout)
-        self._task = asyncio.get_running_loop().create_task(self._polling_loop())
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._thread.start()
+        self._task = asyncio.run_coroutine_threadsafe(self._polling_loop(), self._loop)
 
     def stop(self) -> None:
-        """Stop background polling and close HTTP client."""
+        """Stop background polling and close HTTP client (synchronous)."""
         if self._task is not None:
             self._task.cancel()
             self._task = None
-        if self._client is not None:
-            try:
-                asyncio.get_running_loop().create_task(self._client.aclose())
-            except RuntimeError:
-                pass
-            self._client = None
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+        # httpx client lived in the (now-stopped) background loop thread; let it
+        # be GC'd rather than closing cross-thread.
+        self._client = None
+        if self._loop is not None:
+            self._loop.close()
+            self._loop = None
 
     # ── Background polling loop ─────────────────────────────────────────
 
     async def _polling_loop(self) -> None:
         """Background loop: poll all endpoints at ``_interval``, parse, write to store."""
+        # Create the httpx client here so it binds to THIS loop (background thread).
+        self._client = httpx.AsyncClient(timeout=self._http_timeout)
         try:
             while True:
                 results: dict[str, dict[str, Any]] = {}
