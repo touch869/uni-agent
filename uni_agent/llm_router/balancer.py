@@ -26,7 +26,17 @@ class KVCAwareBalancer:
         if not servers:
             raise ValueError("servers must be non-empty")
         self._config = KVCAwareConfig.from_config(router_config)
-        self._provider = RouteDataProvider(self._config)
+        # collection_names = union of every strategy's collector_names.
+        collection_names = sorted(
+            {name for cfg in self._config.strategies for name in cfg.collector_names}
+        )
+        # TODO(server_address): RouteDataProvider currently takes only
+        # (collectors_config, collection_names); the per-server collection
+        # addresses (ip:port) are meant to come from the server handles below,
+        # but that injection is not yet implemented in the collectors module.
+        # Tracked as a collectors-module design item; provider runs with
+        # whatever addresses the collectors_config carries for now.
+        self._provider = RouteDataProvider(self._config.collector, collection_names)
         self._provider.start()
         self._strategies: list[tuple[Any, float]] = [
             (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight)
@@ -74,13 +84,15 @@ class KVCAwareBalancer:
         return server_id, self._servers[server_id]
 
     def add_servers(self, servers: dict[str, Any]) -> None:
-        """Bulk-add servers: update the pool and register replicas with the provider."""
+        """Bulk-add servers to the pool.
+
+        Note: the provider is a global collector keyed by configured addresses,
+        not by this pool, so it is not touched here (see TODO in ``__init__``).
+        """
         for sid, handle in servers.items():
             self._servers[sid] = handle
-            self._provider.register(sid)
 
     def remove_servers(self, server_ids: list[str]) -> None:
-        """Bulk-remove servers: drop from the pool and unregister from the provider."""
+        """Bulk-remove servers from the pool (provider is not keyed by the pool)."""
         for sid in server_ids:
             self._servers.pop(sid, None)
-            self._provider.unregister(sid)
