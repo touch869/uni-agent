@@ -95,7 +95,25 @@ def _fake_init_provider(self):
 
 
 # Monkeypatch _init_provider before any KVCAwareBalancer is constructed.
+# Save the original and restore it after this module's tests via the autouse
+# fixture below. Without restoration, this class-level patch leaks to Ray
+# worker processes (which fork from this pytest process), so the integration
+# tests in test_balancer_integration_on_cpu.py would construct balancers whose
+# _init_provider is still _fake_init_provider and report "_FakeProvider".
+_original_init_provider = KVCAwareBalancer._init_provider
 KVCAwareBalancer._init_provider = _fake_init_provider
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_init_provider():
+    """Restore the real _init_provider after this module's tests finish.
+
+    Runs before any integration test calls ``ray.init()`` (those live in a
+    later file), so Ray workers fork from a process whose
+    KVCAwareBalancer._init_provider is the real method again.
+    """
+    yield
+    KVCAwareBalancer._init_provider = _original_init_provider
 
 
 def _make_balancer(servers=None):
