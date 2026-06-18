@@ -47,6 +47,9 @@ class KVCacheAwareStrategy:
         self.layer_weights = dict(layer_weights)
         self.collector_names = collector_names
         self.weight = weight
+        # Tiers for which we've already warned about missing slow-path data,
+        # so the slow-path degradation notice is emitted once, not per request.
+        self._tier_warned: set[str] = set()
         logger.info(
             f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, load_threshold={self.load_threshold:.2f}, layer_weights={self.layer_weights}",
         )
@@ -137,6 +140,10 @@ class KVCacheAwareStrategy:
             else:
                 s_cache = gpu_hits[idx] if use_fast else self._slow_cache(provider, replica, effective_prompt_ids)
                 result.append(self.alpha * s_cache + (1 - self.alpha) * load_scores[idx])
+        logger.info(
+            f"score(): final scores "
+            + ", ".join(f"{r.replica_id}={result[i]:.4f}" for i, r in enumerate(replicas)),
+        )
         return result
 
     def _slow_cache(
@@ -149,11 +156,25 @@ class KVCacheAwareStrategy:
 
         cpu and ssd tiers are mutually exclusive, so the weighted sum is <= 1
         with default weights {"cpu": 1.0, "ssd": 0.25}.
+
+        If a tier's hit rate is unavailable (``None`` — mooncake tier collector
+        not yet implemented), its contribution degrades to 0 and a one-time
+        WARNING is emitted per tier.
         """
-        return sum(
-            (provider.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, tier) or 0.0) * tier_weight
-            for tier, tier_weight in self.layer_weights.items()
-        )
+        total = 0.0
+        for tier, tier_weight in self.layer_weights.items():
+            hit = provider.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, tier)
+            if hit is None:
+                if tier not in self._tier_warned:
+                    logger.warning(
+                        f"slow path: tier='{tier}' prefix hit unavailable "
+                        f"(mooncake tier collector not implemented) — "
+                        f"degrading S_cache['{tier}'] to 0",
+                    )
+                    self._tier_warned.add(tier)
+                continue
+            total += hit * tier_weight
+        return total
 
 
 # Auto-register: config dataclass type → runtime strategy class.

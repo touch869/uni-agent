@@ -14,7 +14,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from uni_agent.llm_router.collectors import RouteDataProvider
+# Import RouteDataProvider from its definition module (collectors.provider),
+# not the ``collectors`` package attribute. Unit tests in test_balancer.py
+# monkeypatch ``collectors.RouteDataProvider`` to a fake; if we imported via the
+# package, Ray worker processes that fork from the patched pytest process would
+# bind the fake and report "_FakeProvider" in get_status(). Sourcing the class
+# from its definition site is immune to that package-attribute patch.
+from uni_agent.llm_router.collectors.provider import RouteDataProvider
 from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
@@ -45,6 +51,11 @@ class KVCAwareBalancer:
         discover the Prometheus polling addresses and ZMQ kv-event endpoints.
         The resolved addresses are then passed to ``RouteDataProvider``, which
         routes them to the appropriate collector type at creation time.
+
+        Handles that are not real Ray actors (e.g. plain strings passed by
+        unit tests or bring-up stubs) have no ``get_server_address`` remote;
+        for those, dynamic discovery is skipped and collectors fall back to
+        their configured/default endpoints.
         """
         import ray
 
@@ -54,6 +65,12 @@ class KVCAwareBalancer:
         server_addresses: dict[str, str] = {}
         kv_event_endpoints: dict[str, list[str]] = {}
         for replica_id, handle in self._servers.items():
+            if not hasattr(handle, "get_server_address"):
+                logger.warning(
+                    f"server '{replica_id}' handle has no get_server_address remote "
+                    f"(type={type(handle).__name__}); skipping dynamic endpoint discovery",
+                )
+                continue
             ip, port = ray.get(handle.get_server_address.remote())
             server_addresses[replica_id] = f"{ip}:{port}"
             endpoints = ray.get(handle.get_kv_events_endpoints.remote())

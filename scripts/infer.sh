@@ -1,5 +1,9 @@
 #!/bin/bash
-# Run inference. Can be executed from anywhere:
+# Single-concurrency inference — minimal smoke test on 2 GPUs (1 sample).
+# Can be executed from anywhere.
+#
+# For full multi-concurrency runs (8-GPU data-parallel, full dataset), use
+# scripts/infer_multi.sh instead.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}/.."
@@ -37,7 +41,7 @@ python ${PROJECT_ROOT}/examples/agent_interaction/parallel_infer.py \
     --tensor-parallel-size 1 \
     --n-gpus-per-node 2 \
     --prompt-length 4096 \
-    --response-length 65536 \
+    --response-length 8192 \
     --max-samples 1 \
     --n 1 \
     "${ROUTER_ARGS[@]}"
