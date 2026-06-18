@@ -1,5 +1,9 @@
 #!/bin/bash
-# Run inference. Can be executed from anywhere:
+# Single-concurrency inference — minimal smoke test on 2 GPUs (1 sample).
+# Can be executed from anywhere.
+#
+# For full multi-concurrency runs (8-GPU data-parallel, full dataset), use
+# scripts/infer_multi.sh instead.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}/.."
