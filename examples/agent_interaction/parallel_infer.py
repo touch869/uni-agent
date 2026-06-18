@@ -64,9 +64,9 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.response_length = args.response_length
     config.actor_rollout_ref.rollout.n = args.n
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = args.tensor_parallel_size
-    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.93
-    config.actor_rollout_ref.rollout.max_model_len = min(args.prompt_length + args.response_length + 1024, 70000)
-    config.actor_rollout_ref.rollout.disable_log_stats = False
+    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
+    config.actor_rollout_ref.rollout.max_num_seqs = args.max_num_seqs
+    config.actor_rollout_ref.rollout.max_model_len = min(args.prompt_length + args.response_length + 1024, 262144)
 
     # Data configs
     config.data.return_raw_chat = True
@@ -202,6 +202,12 @@ def main():
     parser.add_argument("--n-gpus-per-node", type=int, default=8, help="Number of GPUs per node.")
     parser.add_argument(
         "--tensor-parallel-size", "--tp", type=int, default=4, help="Tensor parallel size for the model."
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=256,
+        help="vLLM max_num_seqs (concurrent sequences per engine). Default 256 fits large-VRAM GPUs; lower to ~64 on 24GB cards (e.g. RTX 3090) to avoid sampler-warmup OOM.",
     )
 
     args = parser.parse_args()

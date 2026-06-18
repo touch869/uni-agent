@@ -2,7 +2,7 @@
 
   _target_: uni_agent.agent_loop.UniAgentLoop
 
-  concurrency: 1
+  concurrency: 64
   log_dir: /data1/hgq/agentic_log/
   mask_abnormal_exit_traj: false
 
