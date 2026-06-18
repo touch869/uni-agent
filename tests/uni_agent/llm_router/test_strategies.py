@@ -1,9 +1,8 @@
 """Tests for llm_router strategy seams (runtime strategy classes + registry).
 
 These are the minimal collaborator seams the Balancer constructs against
-(see detailed_balancer.md §2.3). Only construction and registry dispatch are
-real here; the actual scoring/ranking algorithm lives in a future strategy-
-module detailed design, so ``route()`` ranking is a deferred stub.
+(see detailed_balancer.md §2.3). Construction, registry dispatch, and routing
+are tested here.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ from uni_agent.llm_router.strategies import (
     KVCacheAwareStrategy,
     ReplicaInfo,
     StrategyRegistry,
+    route,
 )
 
 
@@ -51,12 +51,12 @@ class TestKVCacheAwareStrategy:
         Expectation: returns a KVCacheAwareStrategy carrying the config's strategy fields
         """
         cfg = KVCAwareStrategyConfig(
-            weight=0.7, alpha=0.7, load_threshold=80, collector_names=["vllm_zmq"]
+            weight=0.7, alpha=0.7, load_threshold=0.1, collector_names=["vllm_zmq"]
         )
         strategy = KVCacheAwareStrategy.from_config(cfg)
         assert isinstance(strategy, KVCacheAwareStrategy)
         assert strategy.alpha == 0.7
-        assert strategy.load_threshold == 80
+        assert strategy.load_threshold == 0.1
 
 
 # ============================================================
@@ -79,20 +79,35 @@ class TestReplicaInfo:
 
 
 # ============================================================
-# route() — deferred ranking entry
+# route() — real ranking
 # ============================================================
 
 
 class TestRoute:
-    """R04: route() ranking entry (deferred stub)."""
+    """R04: route() real ranking entry."""
 
-    def test_r04_route_placeholder_returns_replica_ids(self):
+    def test_r04_route_returns_replica_ids_best_first(self):
         """
-        Feature: route() is a placeholder ranking (flow-only; real algorithm deferred)
-        Description: call route() with two ReplicaInfo candidates
-        Expectation: returns both replica ids (a valid ranking; order not asserted)
+        Feature: route() returns replica ids ranked best-first
+        Description: call route() with two ReplicaInfo candidates and an idle provider
+        Expectation: returns both replica ids (valid ranking containing both)
         """
-        from uni_agent.llm_router.strategies import ReplicaInfo, route
 
-        ranking = route([], [1, 2, 3], None, [ReplicaInfo("s0"), ReplicaInfo("s1")])
+        class _IdleProvider:
+            def get_metrics(self, replica_id):
+                return {}  # defaults: kv=1.0 → overloaded, all tied
+
+            def get_gpu_prefix_hit_rate(self, prompt_ids):
+                return {}
+
+            def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+                return 0.0
+
+        cfg = KVCAwareStrategyConfig(
+            weight=1.0, alpha=0.7, load_threshold=0.1, collector_names=["vllm_zmq"]
+        )
+        strategy = KVCacheAwareStrategy.from_config(cfg)
+        replicas = [ReplicaInfo("s0"), ReplicaInfo("s1")]
+        ranking = route([(strategy, 1.0)], [1, 2, 3], _IdleProvider(), replicas)
         assert set(ranking) == {"s0", "s1"}
+        assert len(ranking) == 2
