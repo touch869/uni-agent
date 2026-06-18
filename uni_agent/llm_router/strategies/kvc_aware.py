@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
-from uni_agent.llm_router.collectors.metric_spec import MetricKey
+from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
+from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.strategies.registry import StrategyRegistry
 
 if TYPE_CHECKING:
     from uni_agent.llm_router.collectors.provider import RouteDataProvider
     from uni_agent.llm_router.strategies.base import ReplicaInfo
 
-logger = logging.getLogger(__name__)
+logger = get_router_logger("kvc-aware-strategy")
 
 
 class StrategyError(Exception):
@@ -48,8 +48,7 @@ class KVCacheAwareStrategy:
         self.collector_names = collector_names
         self.weight = weight
         logger.info(
-            "KVCacheAwareStrategy created: alpha=%.2f, load_threshold=%.2f, layer_weights=%s",
-            self.alpha, self.load_threshold, self.layer_weights,
+            f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, load_threshold={self.load_threshold:.2f}, layer_weights={self.layer_weights}",
         )
 
     @classmethod
@@ -99,22 +98,19 @@ class KVCacheAwareStrategy:
             load_scores.append(s_load)
             is_overloaded.append(overloaded)
             logger.debug(
-                "score(): replica=%s kv=%.3f running=%d waiting=%d s_load=%.4f overloaded=%s",
-                replica.replica_id, kv_usage, running, waiting, s_load, overloaded,
+                f"score(): replica={replica.replica_id} kv={kv_usage:.3f} running={running} waiting={waiting} s_load={s_load:.4f} overloaded={overloaded}",
             )
         all_overloaded = all(is_overloaded)
         overloaded_count = sum(is_overloaded)
         if overloaded_count > 0 and not all_overloaded:
             logger.info(
-                "score(): %d/%d replicas overloaded, routing to healthy subset",
-                overloaded_count, len(replicas),
+                f"score(): {overloaded_count}/{len(replicas)} replicas overloaded, routing to healthy subset",
             )
 
         # All overloaded → slow path.
         if all_overloaded:
             logger.info(
-                "score(): all %d replicas overloaded (threshold=%.3f), using slow path",
-                len(replicas), self.load_threshold,
+                f"score(): all {len(replicas)} replicas overloaded (threshold={self.load_threshold:.3f}), using slow path",
             )
             return [
                 self.alpha * self._slow_cache(provider, replica, effective_prompt_ids)
@@ -131,7 +127,7 @@ class KVCacheAwareStrategy:
             for idx, replica in enumerate(replicas)
         ]
         use_fast = any(gpu_hits[idx] > 0 for idx in range(len(replicas)) if not is_overloaded[idx])
-        logger.debug("score(): path=%s", "fast (GPU hit)" if use_fast else "slow (tier cache)")
+        logger.debug(f"score(): path={'fast (GPU hit)' if use_fast else 'slow (tier cache)'}")
 
         result = []
         for idx, replica in enumerate(replicas):

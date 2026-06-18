@@ -22,7 +22,7 @@ from uni_agent.llm_router.strategies import (
     route,
 )
 from uni_agent.llm_router.strategies.base import ReplicaInfo
-from uni_agent.llm_router.collectors.metric_spec import MetricKey
+from uni_agent.llm_router.metric_spec import MetricKey
 
 
 # --------------------------------------------------------------------------- #

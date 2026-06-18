@@ -10,6 +10,12 @@ is replaced with a fake (via sys.modules) so the real collectors import chain
 — which pulls in heavy optional deps (pyzmq, httpx) not installed here — never
 loads. Real collectors (with zmq/httpx) are exercised in the integration-test
 env (.147).
+
+``_init_provider()`` calls ``ray.get()`` on each server handle to resolve
+endpoints; that requires a running Ray cluster with real actor handles. In
+unit tests we monkeypatch ``_init_provider`` to directly create a
+``_FakeProvider`` instead, so the tests stay focused on balancer routing logic
+without needing Ray.
 """
 
 from __future__ import annotations
@@ -24,13 +30,16 @@ class _FakeProvider:
     """Stand-in for RouteDataProvider — no real collectors run.
 
     Records lifecycle (start/stop) and exposes the query surface route() may
-    call. The provider is NOT keyed by the server pool (see balancer TODO), so
-    there is no register/unregister.
+    call. The provider is NOT keyed by the server pool, so there is no
+    register/unregister.
     """
 
-    def __init__(self, collectors_config, collection_names):
+    def __init__(self, collectors_config, collection_names,
+                 server_addresses=None, kv_event_endpoints=None):
         self.collectors_config = collectors_config
         self.collection_names = collection_names
+        self.server_addresses = server_addresses
+        self.kv_event_endpoints = kv_event_endpoints
         self.started = False
         self.stopped = False
 
@@ -47,7 +56,7 @@ class _FakeProvider:
         return {}
 
 
-import uni_agent.llm_router.collectors as _collectors_mod
+import uni_agent.llm_router.collectors as _collectors_mod  # noqa: E402
 _collectors_mod.RouteDataProvider = _FakeProvider
 
 import uni_agent.llm_router.balancer as balancer_mod  # noqa: E402
@@ -67,6 +76,26 @@ def _router_config(weight: float = 1.0):
             },
         ],
     })
+
+
+def _fake_init_provider(self):
+    """Replacement for KVCAwareBalancer._init_provider in unit tests.
+
+    Creates a _FakeProvider directly without calling ``ray.get()`` on
+    server handles — unit tests use plain strings as handles, not Ray
+    actors.
+    """
+    collection_names = sorted(
+        {name for cfg in self._config.strategies for name in cfg.collector_names}
+    )
+    self._provider = _FakeProvider(
+        self._config.collector, collection_names,
+    )
+    self._provider.start()
+
+
+# Monkeypatch _init_provider before any KVCAwareBalancer is constructed.
+KVCAwareBalancer._init_provider = _fake_init_provider
 
 
 def _make_balancer(servers=None):
