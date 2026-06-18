@@ -14,15 +14,12 @@ env (.147).
 
 from __future__ import annotations
 
-import sys
-import types
-
 import pytest
 from omegaconf import OmegaConf
 
 
-# ── Replace the whole collectors module with a fake before importing balancer ──
-# The fake RouteDataProvider stands in for the real one; tests assert on it.
+# ── Patch only RouteDataProvider on the real collectors module ──
+# Keeps the module intact so submodules (metric_spec etc.) remain accessible.
 class _FakeProvider:
     """Stand-in for RouteDataProvider — no real collectors run.
 
@@ -50,9 +47,8 @@ class _FakeProvider:
         return {}
 
 
-_collectors_fake = types.ModuleType("uni_agent.llm_router.collectors")
-_collectors_fake.RouteDataProvider = _FakeProvider
-sys.modules["uni_agent.llm_router.collectors"] = _collectors_fake
+import uni_agent.llm_router.collectors as _collectors_mod
+_collectors_mod.RouteDataProvider = _FakeProvider
 
 import uni_agent.llm_router.balancer as balancer_mod  # noqa: E402
 from uni_agent.llm_router.balancer import KVCAwareBalancer  # noqa: E402
