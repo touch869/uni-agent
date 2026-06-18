@@ -71,9 +71,24 @@ class PollingCollector(ABC):
         self._task = asyncio.run_coroutine_threadsafe(self._polling_loop(), self._loop)
 
     def stop(self) -> None:
-        """Stop background polling and close HTTP client (synchronous)."""
-        if self._task is not None:
-            self._task.cancel()
+        """Stop background polling and close HTTP client (synchronous).
+
+        Cancels the polling task *inside* the background loop so that
+        ``CancelledError`` is properly caught and the coroutine finishes
+        cleanly — this avoids ``Task was destroyed but it is pending!``
+        warnings.
+        """
+        if self._task is not None and self._loop is not None:
+            # Cancel the task *inside* the loop thread and await its
+            # cleanup so CancelledError is consumed before we stop the loop.
+            async def _cancel_and_wait():
+                self._task.cancel()
+                try:
+                    await self._task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            fut = asyncio.run_coroutine_threadsafe(_cancel_and_wait(), self._loop)
+            fut.result(timeout=3)
             self._task = None
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)
