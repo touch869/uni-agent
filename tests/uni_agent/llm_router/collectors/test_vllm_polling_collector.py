@@ -41,9 +41,6 @@ class _CollectorConfigMock:
     PollingCollector.__init__ reads:
       - config.http_polling["polling_interval"]  (float, seconds between polls)
       - config.http_polling["http_timeout"]      (float, HTTP request timeout)
-
-    NOTE: server_address is currently hardcoded in PollingCollector.__init__
-    as ["127.0.0.1:8000"] — tests must align VLLM_PORT accordingly.
     """
 
     def __init__(
@@ -161,15 +158,14 @@ class TestVLLMPollingCollectorWithRealService:
             MetricsStore.get(node_id, MetricKey.NUM_REQUESTS_WAITING) returns an int.
             MetricsStore.all_ids() contains the node_id.
         """
-        # 1. Build config — server_address is hardcoded in PollingCollector as
-        # ["127.0.0.1:8000"], so VLLM_PORT must be 8000.
+        # 1. Build config and server addresses
         config = _CollectorConfigMock(
             polling_interval=2.0,   # poll every 2s
             http_timeout=10.0,
         )
 
         # 2. Create collector and store
-        collector = VLLMPollingCollector(config)
+        collector = VLLMPollingCollector(config, server_addresses={NODE_ID: NODE_ID})
         store = MetricsStore()
 
         # 3. Start background polling (needs an async event loop)
@@ -220,7 +216,7 @@ class TestVLLMPollingCollectorWithRealService:
             http_timeout=10.0,
         )
 
-        collector = VLLMPollingCollector(config)
+        collector = VLLMPollingCollector(config, server_addresses={NODE_ID: NODE_ID})
         store = MetricsStore()
 
         async def _run_poll():
@@ -251,7 +247,7 @@ class TestVLLMPollingCollectorWithRealService:
             http_timeout=10.0,
         )
 
-        collector = VLLMPollingCollector(config)
+        collector = VLLMPollingCollector(config, server_addresses={NODE_ID: NODE_ID})
         store = MetricsStore()
 
         async def _run_poll():
@@ -287,7 +283,7 @@ class TestVLLMPollingCollectorWithRealService:
             http_timeout=10.0,
         )
 
-        collector = VLLMPollingCollector(config)
+        collector = VLLMPollingCollector(config, server_addresses={NODE_ID: NODE_ID})
         store = MetricsStore()
 
         async def _run_poll():

@@ -18,6 +18,9 @@ from concurrent.futures import Future
 from abc import ABC, abstractmethod
 from typing import Any
 
+from uni_agent.llm_router.logging import get_router_logger
+
+logger = get_router_logger("event-collector")
 
 class EventCollector(ABC):
     """Base class for event-driven data collectors.
@@ -49,6 +52,7 @@ class EventCollector(ABC):
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
         self._task = asyncio.run_coroutine_threadsafe(self._subscribe_loop(), self._loop)
+        logger.info(f"start event loop in background.")
 
     def stop(self) -> None:
         """Stop background event subscription (synchronous)."""

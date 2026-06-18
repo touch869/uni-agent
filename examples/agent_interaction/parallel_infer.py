@@ -73,6 +73,19 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.data.max_prompt_length = args.prompt_length
     config.data.max_response_length = args.response_length
 
+    if "kvc_aware_router.yaml" in args.router_config_path:
+        # kv-cache config with hybrid KV cache manager for Mamba-Attention hybrid models
+        vllm_kwargs = {
+            "vllm": {
+                "kv-events-config": {
+                    "enable_kv_cache_events": True,
+                    "publisher": "zmq",
+                    "topic": "kv-events"
+                }
+            }
+        }
+        config.actor_rollout_ref.rollout.engine_kwargs = vllm_kwargs
+
     return config
 
 

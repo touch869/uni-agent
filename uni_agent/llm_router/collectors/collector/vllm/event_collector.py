@@ -10,6 +10,9 @@ from uni_agent.llm_router.config.router import CollectorConfig
 from uni_agent.llm_router.collectors.hash import compute_hash
 from uni_agent.llm_router.collectors.collector.vllm.kv_event import KVCacheEvent
 from uni_agent.llm_router.collectors.collector.zmq_event_collector import ZMQEventCollector
+from uni_agent.llm_router.logging import get_router_logger
+
+logger = get_router_logger("vllm-kv-event-collector")
 
 
 class VLLMKVEventCollector(ZMQEventCollector):
@@ -34,8 +37,8 @@ class VLLMKVEventCollector(ZMQEventCollector):
                  get the parent's local prefix hash.
     """
 
-    def __init__(self, config) -> None:
-        super().__init__(config)
+    def __init__(self, config, kv_event_addresses: dict[str, list[str]] | None = None) -> None:
+        super().__init__(config, kv_event_addresses=kv_event_addresses)
         self.remote_to_local_block_hash: dict[str, str] = {}
 
     def _consume_payload(self, payload: bytes, node_id: str) -> None:
@@ -49,10 +52,11 @@ class VLLMKVEventCollector(ZMQEventCollector):
         try:
             raw_data = msgpack.unpackb(payload, raw=False)
             events = KVCacheEvent.from_raw(raw_data, default_replica_id=node_id)
+            logger.debug(f"consumed payload from {node_id}: {len(events)} events")
             for event in events:
                 self._apply_event(event, default_replica_id=node_id)
-        except (msgpack.UnpackException, ValueError, TypeError):
-            pass
+        except (msgpack.UnpackException, ValueError, TypeError) as e:
+            logger.warning(f"failed to parse msgpack payload from {node_id}: {type(e).__name__}: {e}")
 
     def _apply_event(
         self,
@@ -81,7 +85,7 @@ class VLLMKVEventCollector(ZMQEventCollector):
         seed = 0
 
         if event.is_store:
-            # Learn block_size from the first event
+            logger.debug(f"BlockStored: replica={replica_id}, blocks={len(event.block_hashes)}, block_size={event.block_size}")
             if store.block_size is None and event.block_size is not None:
                 store.block_size = event.block_size
 
@@ -112,6 +116,7 @@ class VLLMKVEventCollector(ZMQEventCollector):
                 store.add_blocks(replica_id, local_hashes)
 
         elif event.is_remove:
+            logger.debug(f"BlockRemoved: replica={replica_id}, blocks={len(event.block_hashes)}")
             # Convert remote block_hashes to local hashes for removal
             local_hashes = [
                 self.remote_to_local_block_hash[bh]
@@ -124,4 +129,5 @@ class VLLMKVEventCollector(ZMQEventCollector):
                 self.remote_to_local_block_hash.pop(bh, None)
 
         elif event.is_clear:
+            logger.info(f"AllBlocksCleared: replica={replica_id}")
             store.clear_replica(replica_id)
