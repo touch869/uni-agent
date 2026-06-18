@@ -25,6 +25,6 @@ docker run -d \
 # 验证
 echo "=== 验证 ==="
 docker exec ${CONTAINER_NAME} nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-echo "✅ 容器 ${CONTAINER_NAME} 就绪 (GPU device=${GPU_DEVICE})"
+echo "✅ 容器 ${CONTAINER_NAME} 就绪"
 
 
