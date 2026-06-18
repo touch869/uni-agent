@@ -19,6 +19,9 @@ from uni_agent.llm_router.config.router import CollectorConfig
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.store.metrics_store import MetricsStore
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
+from uni_agent.llm_router.logging import get_router_logger
+
+logger = get_router_logger("provider")
 
 
 class RouteDataProvider:
@@ -47,6 +50,8 @@ class RouteDataProvider:
         kv_event_endpoints: dict[str, list[str]] | None = None,
     ) -> None:
         self._collectors: list[Any] = []
+        # Snapshot the collection names for lifecycle logging.
+        self._collection_names = list(collection_names)
 
         http_polling = collectors_config.http_polling
         long_conn = collectors_config.long_connection
@@ -72,14 +77,51 @@ class RouteDataProvider:
                 collector = BUILTIN_REGISTRY.get_collector(name)
             self._collectors.append(collector)
 
+        logger.info(
+            "RouteDataProvider created: collection_names=%s, collectors=[%s]",
+            collection_names,
+            ", ".join(type(c).__name__ for c in self._collectors) or "<none>",
+        )
+
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Start all collectors."""
-        for collector in self._collectors:
+        logger.info("RouteDataProvider starting %d collector(s)", len(self._collectors))
+        for name, collector in zip(self._collection_names, self._collectors):
             collector.start()
+            logger.info(
+                "collector started: name=%s type=%s",
+                name, type(collector).__name__,
+            )
 
     def stop(self) -> None:
         """Stop all collectors and await their cleanup."""
+        logger.info("RouteDataProvider stopping %d collector(s)", len(self._collectors))
         for collector in self._collectors:
             collector.stop()
+
+    # ── Query proxies (delegate to the singleton stores) ────────────────
+    #
+    # The strategy layer calls these on the provider; they forward to the
+    # appropriate singleton store so callers don't need to know which store
+    # holds which data.  Computation lives in the store classes — the
+    # provider is only a routing shim.
+
+    def get_gpu_prefix_hit_rate(self, prompt_ids: list[int]) -> dict[str, int]:
+        """Per-replica GPU prefix-cache hit percent (0–100).
+
+        Delegates to ``KVCacheStore.default().get_gpu_prefix_hit_rate``.
+        """
+        return KVCacheStore.default().get_gpu_prefix_hit_rate(prompt_ids)
+
+    def get_tier_prefix_hit_rate(
+        self, node_id: str, prompt_ids: list[int], tier: str,
+    ) -> float | None:
+        """Tier-level (cpu/ssd) prefix-cache hit rate, or ``None`` if unavailable.
+
+        Mooncake tier collection is not yet implemented; the store returns
+        ``0.0`` in that case, which we surface as ``None`` so the slow-path
+        caller can distinguish "no data" from a genuine 0% hit and warn.
+        """
+        return KVCacheStore.default().get_tier_prefix_hit_rate(node_id, prompt_ids, tier) or None
