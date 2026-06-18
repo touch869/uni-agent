@@ -2,10 +2,10 @@
 _target_: uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig
 weight: 1.0
 alpha: 0.7
-load_threshold: 80
+load_threshold: 0.1
 layer_weights:
     cpu: 1.0
     ssd: 0.25
 collector_names:
     - vllm_zmq
-    - mooncake_prometheus
+    - vllm_metrics
