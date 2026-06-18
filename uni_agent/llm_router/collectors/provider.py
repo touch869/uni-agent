@@ -26,6 +26,9 @@ from uni_agent.llm_router.collectors.hash import get_prefix_hashes
 from uni_agent.llm_router.collectors.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.collectors.store.metrics_store import MetricsStore
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
+from uni_agent.llm_router.logging import get_router_logger
+
+logger = get_router_logger("provider")
 
 
 class RouteDataProvider:
@@ -75,14 +78,23 @@ class RouteDataProvider:
                 )
             else:
                 self._collectors.append(collector_cls(config=collectors_config))
+        logger.info(
+            f"RouteDataProvider created: collection_names={collection_names}, "
+            f"collectors=[{', '.join(type(c).__name__ for c in self._collectors) or '<none>'}], "
+            f"stores=[{', '.join(s.__name__ for s in self._stores) or '<none>'}]",
+        )
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Start all collectors, binding each to its deduplicated store."""
+        logger.info(f"RouteDataProvider starting {len(self._collectors)} collector(s)")
         for name, collector in zip(self._collection_names, self._collectors):
             store_cls = BUILTIN_REGISTRY.get_store(name)
             collector.start(store=self._stores[store_cls])
+            logger.info(
+                f"collector started: name={name} type={type(collector).__name__} store={store_cls.__name__}",
+            )
 
     # ── Convenience accessors for commonly-used stores ────────────────
 
@@ -172,7 +184,7 @@ class RouteDataProvider:
 
     def get_tier_prefix_hit_rate(
         self, node_id: str, prompt_ids: list[int], tier: str,
-    ) -> float:
+    ) -> float | None:
         """Query tier-level prefix cache hit rate (slow-path data).
 
         v1: reads from snapshot (PollingCollector for Mooncake metrics).
@@ -184,12 +196,18 @@ class RouteDataProvider:
             tier: ``"cpu"`` or ``"ssd"``.
 
         Returns:
-            Hit rate 0.0–1.0; returns 0.0 if no data in snapshot.
+            Hit rate 0.0–1.0, or ``None`` when no tier data is available
+            (mooncake collector not yet implemented). Callers should treat
+            ``None`` as "data missing" and degrade to 0 with a warning,
+            NOT as a genuine 0% hit.
         """
-        # v1 placeholder — read from snapshot when tier metrics are available
-        return 0.0
+        # v1 placeholder — mooncake tier collector is not yet implemented.
+        # Return None (not 0.0) so the slow-path caller can distinguish
+        # "no data" from a real miss and warn appropriately.
+        return None
 
     def stop(self) -> None:
         """Stop all collectors and clean up."""
+        logger.info(f"RouteDataProvider stopping {len(self._collectors)} collector(s)")
         for collector in self._collectors:
             collector.stop()

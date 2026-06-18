@@ -7,6 +7,9 @@ from typing import Any
 from uni_agent.llm_router.config.router import CollectorConfig
 from uni_agent.llm_router.collectors.metric_spec import METRIC_SPECS, MetricKey
 from uni_agent.llm_router.collectors.collector.polling_collector import PollingCollector
+from uni_agent.llm_router.logging import get_router_logger
+
+logger = get_router_logger("vllm-polling-collector")
 
 
 class VLLMPollingCollector(PollingCollector):
@@ -34,4 +37,5 @@ class VLLMPollingCollector(PollingCollector):
             if canonical:
                 value_type = METRIC_SPECS[canonical].get("value_type", float)
                 result[canonical] = value_type(value)
+        logger.debug(f"VLLMPollingCollector parsed: node={node_id} metrics={result}")
         return result
