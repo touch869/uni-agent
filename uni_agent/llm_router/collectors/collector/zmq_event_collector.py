@@ -75,12 +75,53 @@ class ZMQEventCollector(EventCollector):
         self._sub_tasks: dict[str, asyncio.Task] = {}
 
     def stop(self) -> None:
-        """Stop ZMQ subscription and close all sockets."""
+        """Stop ZMQ subscription and close all sockets.
+
+        Cancels all subscription tasks *inside* the background loop so
+        that ``CancelledError`` is properly caught and coroutines finish
+        cleanly — this avoids ``Task was destroyed but it is pending!``
+        warnings.
+        """
         self._stopped = True
-        super().stop()  # cancels self._task
-        for task in self._sub_tasks.values():
-            task.cancel()
+        # Cancel the main subscribe task and all per-replica sub-tasks
+        # inside the loop thread, then await their cleanup.
+        if self._task is not None and self._loop is not None:
+            async def _cancel_and_wait():
+                self._task.cancel()
+                for t in self._sub_tasks.values():
+                    t.cancel()
+                # Wait for the main task to finish (it will cancel
+                # sub-tasks in its CancelledError handler too, but we
+                # already did it above for safety).
+                try:
+                    await self._task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                # Wait for all sub-tasks to finish their CancelledError
+                # cleanup (close sockets per-replica in their finally).
+                for t in list(self._sub_tasks.values()):
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            fut = asyncio.run_coroutine_threadsafe(_cancel_and_wait(), self._loop)
+            try:
+                fut.result(timeout=3)
+            except Exception:
+                pass
+            self._task = None
         self._sub_tasks.clear()
+        # Now stop the loop and join the thread (EventCollector.stop
+        # does this, but we already cancelled the task ourselves above,
+        # so we skip the super's cancel and only do loop/thread cleanup).
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+        if self._loop is not None:
+            self._loop.close()
+            self._loop = None
         self._close_all_zmq_sockets()
 
     # ── ZMQ connection management ───────────────────────────────────────
