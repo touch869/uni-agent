@@ -67,6 +67,7 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
     config.actor_rollout_ref.rollout.max_num_seqs = args.max_num_seqs
     config.actor_rollout_ref.rollout.max_model_len = min(args.prompt_length + args.response_length + 1024, 262144)
+    config.actor_rollout_ref.rollout.disable_log_stats = False  # expose vllm: metrics on /metrics for the router
 
     # Data configs
     config.data.return_raw_chat = True
