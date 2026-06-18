@@ -12,23 +12,14 @@ Protocol (6 methods) via structural subtyping.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from uni_agent.llm_router.collectors import RouteDataProvider
 from uni_agent.llm_router.config import KVCAwareConfig
+from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
 
-logger = logging.getLogger(__name__)
-# The balancer runs as a Ray actor in its own process, where the root logger
-# has no handler/level configured by default — INFO would be swallowed. Attach
-# a StreamHandler at INFO so routing decisions reach Ray's captured log stream.
-if not logger.handlers:
-    _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [KVCAwareBalancer] %(message)s"))
-    logger.addHandler(_h)
-logger.setLevel(logging.INFO)
-logger.propagate = False
+logger = get_router_logger("balancer")
 
 
 class KVCAwareBalancer:
@@ -38,24 +29,42 @@ class KVCAwareBalancer:
         if not servers:
             raise ValueError("servers must be non-empty")
         self._config = KVCAwareConfig.from_config(router_config)
-        # collection_names = union of every strategy's collector_names.
-        collection_names = sorted(
-            {name for cfg in self._config.strategies for name in cfg.collector_names}
-        )
-        # TODO(server_address): RouteDataProvider currently takes only
-        # (collectors_config, collection_names); the per-server collection
-        # addresses (ip:port) are meant to come from the server handles below,
-        # but that injection is not yet implemented in the collectors module.
-        # Tracked as a collectors-module design item; provider runs with
-        # whatever addresses the collectors_config carries for now.
-        self._provider = RouteDataProvider(self._config.collector, collection_names)
-        self._provider.start()
         self._strategies: list[tuple[Any, float]] = [
             (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight)
             for cfg in self._config.strategies
         ]
         self._servers: dict[str, Any] = dict(servers)
         self._route_calls = 0
+        self._init_provider()
+
+    def _init_provider(self) -> None:
+        """Resolve per-server endpoints from Ray actor handles and init the provider.
+
+        Iterates ``self._servers``, calling ``get_server_address.remote()`` and
+        ``get_kv_events_endpoints.remote()`` on each handle to dynamically
+        discover the Prometheus polling addresses and ZMQ kv-event endpoints.
+        The resolved addresses are then passed to ``RouteDataProvider``, which
+        routes them to the appropriate collector type at creation time.
+        """
+        import ray
+
+        collection_names = sorted(
+            {name for cfg in self._config.strategies for name in cfg.collector_names}
+        )
+        server_addresses: dict[str, str] = {}
+        kv_event_endpoints: dict[str, list[str]] = {}
+        for replica_id, handle in self._servers.items():
+            ip, port = ray.get(handle.get_server_address.remote())
+            server_addresses[replica_id] = f"{ip}:{port}"
+            endpoints = ray.get(handle.get_kv_events_endpoints.remote())
+            if endpoints is not None:
+                kv_event_endpoints[replica_id] = endpoints
+        self._provider = RouteDataProvider(
+            self._config.collector, collection_names,
+            server_addresses=server_addresses,
+            kv_event_endpoints=kv_event_endpoints,
+        )
+        self._provider.start()
 
     def get_all_servers(self) -> list[str]:
         """List all active server ids."""
@@ -94,16 +103,15 @@ class KVCAwareBalancer:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
         logger.info(
-            "request=%s routed to server=%s (ranking=%s, pool=%s)",
-            request_id, server_id, ranking, list(self._servers),
+            f"request={request_id} routed to server={server_id} (ranking={ranking}, pool={list(self._servers)})",
         )
         return server_id, self._servers[server_id]
 
     def add_servers(self, servers: dict[str, Any]) -> None:
         """Bulk-add servers to the pool.
 
-        Note: the provider is a global collector keyed by configured addresses,
-        not by this pool, so it is not touched here (see TODO in ``__init__``).
+        Note: the provider is keyed by the endpoint addresses resolved at
+        init time, not by this pool, so it is not touched here.
         """
         for sid, handle in servers.items():
             self._servers[sid] = handle

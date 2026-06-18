@@ -7,12 +7,13 @@ provider, replicas)`` and maps ``ranking[0]`` back to a server handle
 
 from __future__ import annotations
 
-import logging
 import math
 import random
 from typing import Any, Protocol, runtime_checkable
 
-logger = logging.getLogger(__name__)
+from uni_agent.llm_router.logging import get_router_logger
+
+logger = get_router_logger("routing")
 
 
 @runtime_checkable
@@ -78,8 +79,7 @@ def route(
             ids = [r.replica_id for r in replicas]
             random.shuffle(ids)
             logger.warning(
-                "route(): %s failed (%s: %s), falling back to random order",
-                name, type(exc).__name__, exc,
+                f"route(): {name} failed ({type(exc).__name__}: {exc}), falling back to random order",
             )
             return ids
         for idx in range(n):
@@ -87,7 +87,6 @@ def route(
 
     ranking = sorted(range(n), key=lambda idx: _rank_key(final[idx]), reverse=True)
     logger.info(
-        "route(): replicas=%d best=%s score=%.4f",
-        n, replicas[ranking[0]].replica_id, final[ranking[0]],
+        f"route(): replicas={n} best={replicas[ranking[0]].replica_id} score={final[ranking[0]]:.4f}",
     )
     return [replicas[idx].replica_id for idx in ranking]
