@@ -19,8 +19,8 @@ class VLLMPollingCollector(PollingCollector):
         "vllm:num_requests_waiting": MetricKey.NUM_REQUESTS_WAITING,
     }
 
-    def __init__(self, config) -> None:
-        super().__init__(config)
+    def __init__(self, config, server_addresses: dict[str, str] | None = None) -> None:
+        super().__init__(config, server_addresses=server_addresses)
 
     def _parse_response(self, text: str, node_id: str) -> dict[str, Any]:
         """Parse vLLM Prometheus exposition-format text into {canonical_key: value} dict."""

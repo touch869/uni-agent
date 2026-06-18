@@ -8,6 +8,11 @@ Collectors and stores are created from ``BUILTIN_REGISTRY`` based on
 ``collection_names``.  Stores are deduplicated by class — the same
 store class is only instantiated once and shared across all collectors
 that reference it.
+
+Endpoint data (server addresses, kv-event endpoints) is routed to
+the appropriate collector type at creation time:
+- ``PollingCollector`` → ``server_addresses``
+- ``EventCollector`` subclasses → ``kv_event_addresses``
 """
 
 from __future__ import annotations
@@ -15,6 +20,8 @@ from __future__ import annotations
 from typing import Any
 
 from uni_agent.llm_router.config.router import CollectorConfig
+from uni_agent.llm_router.collectors.collector.polling_collector import PollingCollector
+from uni_agent.llm_router.collectors.collector.event_collector import EventCollector
 from uni_agent.llm_router.collectors.hash import get_prefix_hashes
 from uni_agent.llm_router.collectors.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.collectors.store.metrics_store import MetricsStore
@@ -41,7 +48,9 @@ class RouteDataProvider:
     def __init__(
         self,
         collectors_config,
-        collection_names
+        collection_names,
+        server_addresses: dict[str, str] | None = None,
+        kv_event_endpoints: dict[str, list[str]] | None = None,
     ) -> None:
         self._collection_names = collection_names
 
@@ -53,7 +62,19 @@ class RouteDataProvider:
             if store_cls not in self._stores:
                 self._stores[store_cls] = store_cls()
             collector_cls = BUILTIN_REGISTRY.get_collector(name)
-            self._collectors.append(collector_cls(config=collectors_config))
+            # Route endpoint data by collector type:
+            # - PollingCollector → server_addresses (Prometheus polling endpoints)
+            # - EventCollector subclasses → kv_event_addresses (ZMQ event endpoints)
+            if issubclass(collector_cls, PollingCollector):
+                self._collectors.append(
+                    collector_cls(config=collectors_config, server_addresses=server_addresses)
+                )
+            elif issubclass(collector_cls, EventCollector):
+                self._collectors.append(
+                    collector_cls(config=collectors_config, kv_event_addresses=kv_event_endpoints)
+                )
+            else:
+                self._collectors.append(collector_cls(config=collectors_config))
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 

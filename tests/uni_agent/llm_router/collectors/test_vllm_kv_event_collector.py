@@ -35,8 +35,7 @@ VLLM_HOST = os.environ.get("VLLM_HOST", "127.0.0.1")
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
 NODE_ID = f"{VLLM_HOST}:{VLLM_PORT}"
 
-# ZMQ ports — must match hardcoded values in ZMQEventCollector:
-#   sub: 5555, replay: 5556 (per-replica, default for "127.0.0.1:8000")
+# ZMQ ports — used to construct kv_event_addresses for the collector
 ZMQ_SUB_PORT = int(os.environ.get("ZMQ_SUB_PORT", "5555"))
 ZMQ_REPLAY_PORT = int(os.environ.get("ZMQ_REPLAY_PORT", "5556"))
 
@@ -51,10 +50,6 @@ class _ZMQCollectorConfigMock:
       - config.long_connection["max_retry_delay"]        (float)
       - config.long_connection["max_retry_attempts"]     (int)
       - config.long_connection["retry_backoff_factor"]   (float)
-
-    NOTE: kv_event_address is currently hardcoded in ZMQEventCollector.__init__
-    as {"127.0.0.1:8000": ["127.0.0.1:5555", "127.0.0.1:5556"]} — tests must
-    align VLLM_PORT and ZMQ ports accordingly.
     """
 
     def __init__(
@@ -81,9 +76,6 @@ def vllm_kv_service():
     vLLM binds:
       - PUB socket at tcp://*:<ZMQ_SUB_PORT>   (default 5555)
       - ROUTER (replay) socket at tcp://*:<ZMQ_REPLAY_PORT>  (default 5556)
-
-    NOTE: ZMQ ports must match the hardcoded values in ZMQEventCollector:
-      {"127.0.0.1:8000": ["127.0.0.1:5555", "127.0.0.1:5556"]}
     """
     kv_events_config = json.dumps({
         "enable_kv_cache_events": True,
@@ -191,7 +183,7 @@ class TestVLLMKVEventCollectorWithRealService:
             max_retry_attempts=5,
         )
 
-        collector = VLLMKVEventCollector(config)
+        collector = VLLMKVEventCollector(config, kv_event_addresses={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]})
         store = KVCacheStore()
 
         async def _run_subscribe():
@@ -242,7 +234,7 @@ class TestVLLMKVEventCollectorWithRealService:
             max_retry_attempts=5,
         )
 
-        collector = VLLMKVEventCollector(config)
+        collector = VLLMKVEventCollector(config, kv_event_addresses={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]})
         store = KVCacheStore()
 
         async def _run_subscribe():
@@ -276,7 +268,7 @@ class TestVLLMKVEventCollectorWithRealService:
             max_retry_attempts=5,
         )
 
-        collector = VLLMKVEventCollector(config)
+        collector = VLLMKVEventCollector(config, kv_event_addresses={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]})
         store = KVCacheStore()
 
         async def _run_subscribe():
@@ -318,7 +310,7 @@ class TestVLLMKVEventCollectorWithRealService:
             max_retry_attempts=5,
         )
 
-        collector = VLLMKVEventCollector(config)
+        collector = VLLMKVEventCollector(config, kv_event_addresses={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]})
         store = KVCacheStore()
 
         async def _run_subscribe():
@@ -359,7 +351,7 @@ class TestVLLMKVEventCollectorWithRealService:
             max_retry_attempts=5,
         )
 
-        collector = VLLMKVEventCollector(config)
+        collector = VLLMKVEventCollector(config, kv_event_addresses={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]})
         store = KVCacheStore()
 
         async def _run_subscribe():
