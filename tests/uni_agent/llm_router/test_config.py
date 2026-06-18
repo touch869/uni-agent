@@ -93,23 +93,23 @@ class TestStrategyNormalInput:
         cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
         assert cfg.alpha == 0.7
 
-    def test_s07_load_threshold_80(self):
+    def test_s07_load_threshold_0_5(self):
         """
         Feature: load_threshold field parses normally
-        Description: construct KVCAwareStrategyConfig with load_threshold=80
-        Expectation: cfg.load_threshold == 80
+        Description: construct KVCAwareStrategyConfig with load_threshold=0.5
+        Expectation: cfg.load_threshold == 0.5
         """
-        cfg = KVCAwareStrategyConfig(weight=1.0, load_threshold=80, collector_names=_CN)
-        assert cfg.load_threshold == 80
+        cfg = KVCAwareStrategyConfig(weight=1.0, load_threshold=0.5, collector_names=_CN)
+        assert cfg.load_threshold == 0.5
 
-    def test_s08_load_threshold_default_80(self):
+    def test_s08_load_threshold_default_0_1(self):
         """
         Feature: load_threshold uses default when omitted
         Description: construct KVCAwareStrategyConfig without load_threshold
-        Expectation: cfg.load_threshold == 80
+        Expectation: cfg.load_threshold == 0.1
         """
         cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.load_threshold == 80
+        assert cfg.load_threshold == 0.1
 
     def test_s09_layer_weights_dict(self):
         """
@@ -227,6 +227,17 @@ class TestStrategyAbnormalInput:
         """
         with pytest.raises(ConfigError, match="load_threshold"):
             KVCAwareStrategyConfig(weight=1.0, load_threshold=-1, collector_names=_CN)
+
+    def test_s19b_load_threshold_one_or_above(self):
+        """
+        Feature: load_threshold >= 1 triggers validation error
+        Description: construct strategy config with load_threshold=1.0 and load_threshold=80
+        Expectation: raises ConfigError matching "load_threshold"
+        """
+        with pytest.raises(ConfigError, match="load_threshold"):
+            KVCAwareStrategyConfig(weight=1.0, load_threshold=1.0, collector_names=_CN)
+        with pytest.raises(ConfigError, match="load_threshold"):
+            KVCAwareStrategyConfig(weight=1.0, load_threshold=80, collector_names=_CN)
 
     def test_s20_layer_weights_non_cpu_ssd_key(self):
         """
@@ -354,7 +365,7 @@ class TestStrategyHydraNormal:
         from hydra.utils import instantiate
         result = instantiate(entry)
         assert result.alpha == 0.7
-        assert result.load_threshold == 80
+        assert result.load_threshold == 0.1
         assert result.layer_weights == {"cpu": 1.0, "ssd": 0.25}
         assert result.collector_names == ["vllm_zmq"]
 
@@ -1097,11 +1108,9 @@ class TestKVCAwareOther:
         assert isinstance(strategy, KVCAwareStrategyConfig)
         assert strategy.weight == 1.0
         assert strategy.alpha == 0.7
-        assert strategy.load_threshold == 80
+        assert strategy.load_threshold == 0.1
         assert strategy.layer_weights == {"cpu": 1.0, "ssd": 0.25}
-        assert strategy.collector_names == ["vllm_zmq"]
-
-        # ── http_polling / long_connection params ──
+        assert strategy.collector_names == ["vllm_zmq", "vllm_metrics"]
         assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
         assert result.collector.long_connection == {
             "base_retry_delay": 1.0, "max_retry_delay": 30.0,
@@ -1257,7 +1266,7 @@ class TestDropInIntegration:
         assert isinstance(s, KVCAwareStrategyConfig)
         assert s.weight == 1.0
         assert s.alpha == 0.7
-        assert s.collector_names == ["vllm_zmq"]
+        assert s.collector_names == ["vllm_zmq", "vllm_metrics"]
         assert result.collector.http_polling["polling_interval"] == 5.0
         assert result.collector.long_connection["max_retry_attempts"] == 5
         assert result.cache_store.kv_cache_store_type == "list"

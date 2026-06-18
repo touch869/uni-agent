@@ -8,6 +8,15 @@ from uni_agent.llm_router.config import (
     KVCAwareStrategyConfig,
     StrategyConfig,
 )
+from uni_agent.llm_router.strategies import (
+    KVCacheAwareStrategy,
+    RoutingStrategy,
+    StrategyError,
+    StrategyRegistry,
+    route,
+)
+from uni_agent.llm_router.collectors import MetricKey, RouteDataProvider
+from uni_agent.llm_router.strategies import ReplicaInfo
 
 __all__ = [
     "CacheStoreConfig",
@@ -16,4 +25,12 @@ __all__ = [
     "KVCAwareConfig",
     "KVCAwareStrategyConfig",
     "StrategyConfig",
+    "KVCacheAwareStrategy",
+    "RoutingStrategy",
+    "StrategyError",
+    "StrategyRegistry",
+    "route",
+    "MetricKey",
+    "ReplicaInfo",
+    "RouteDataProvider",
 ]
