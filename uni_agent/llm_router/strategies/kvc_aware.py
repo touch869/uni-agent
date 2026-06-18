@@ -137,6 +137,10 @@ class KVCacheAwareStrategy:
             else:
                 s_cache = gpu_hits[idx] if use_fast else self._slow_cache(provider, replica, effective_prompt_ids)
                 result.append(self.alpha * s_cache + (1 - self.alpha) * load_scores[idx])
+        logger.info(
+            f"score(): final scores "
+            + ", ".join(f"{r.replica_id}={result[i]:.4f}" for i, r in enumerate(replicas)),
+        )
         return result
 
     def _slow_cache(
