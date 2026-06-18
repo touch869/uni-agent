@@ -19,13 +19,13 @@ class KVCAwareStrategyConfig(StrategyConfig):
     """
 
     alpha: float = 0.7
-    load_threshold: float = 80.0
+    load_threshold: float = 0.1
     layer_weights: dict[str, float] = field(default_factory=lambda: {"cpu": 1.0, "ssd": 0.25})
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.load_threshold <= 0:
-            raise ConfigError(f"load_threshold must be > 0, got {self.load_threshold}")
+        if not 0 < self.load_threshold < 1:
+            raise ConfigError(f"load_threshold must be in (0, 1), got {self.load_threshold}")
         valid_keys = {"cpu", "ssd"}
         if not set(self.layer_weights.keys()) == valid_keys:
             raise ConfigError(

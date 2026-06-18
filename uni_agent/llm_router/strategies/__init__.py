@@ -6,13 +6,15 @@ The Balancer imports from here (detailed_balancer.md §2.3).
 from __future__ import annotations
 
 from uni_agent.llm_router.strategies.base import ReplicaInfo
-from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy
+from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy, StrategyError
 from uni_agent.llm_router.strategies.registry import StrategyRegistry
-from uni_agent.llm_router.strategies.routing import route
+from uni_agent.llm_router.strategies.routing import RoutingStrategy, route
 
 __all__ = [
     "KVCacheAwareStrategy",
     "ReplicaInfo",
+    "RoutingStrategy",
+    "StrategyError",
     "StrategyRegistry",
     "route",
 ]
