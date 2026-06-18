@@ -94,7 +94,7 @@ class KVCAwareBalancer:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
         logger.info(
-            "[KVCAwareBalancer] request=%s routed to server=%s (ranking=%s, pool=%s)",
+            "request=%s routed to server=%s (ranking=%s, pool=%s)",
             request_id, server_id, ranking, list(self._servers),
         )
         return server_id, self._servers[server_id]
