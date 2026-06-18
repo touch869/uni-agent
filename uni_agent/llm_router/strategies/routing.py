@@ -86,7 +86,8 @@ def route(
             final[idx] += weight * scores[idx]
 
     ranking = sorted(range(n), key=lambda idx: _rank_key(final[idx]), reverse=True)
-    logger.info(
-        f"route(): replicas={n} best={replicas[ranking[0]].replica_id} score={final[ranking[0]]:.4f}",
+    scores_str = ", ".join(
+        f"{replicas[idx].replica_id}={final[idx]:.4f}" for idx in ranking
     )
+    logger.info(f"route(): replicas={n} ranking=[{scores_str}]")
     return [replicas[idx].replica_id for idx in ranking]
