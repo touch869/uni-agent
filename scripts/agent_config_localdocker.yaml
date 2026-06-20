@@ -2,7 +2,7 @@
 
   _target_: uni_agent.agent_loop.UniAgentLoop
 
-  concurrency: 64
+  concurrency: 16
   log_dir: /data1/hgq/agentic_log/
   mask_abnormal_exit_traj: false
 
@@ -13,10 +13,13 @@
   env:
     deployment:
       type: local
-      command: "/usr/bin/python3 -m pip install -q swe-rex -i https://pypi.tuna.tsinghua.edu.cn/simple && /usr/bin/python3 -m swerex.server --auth-token {token}"
+      command: "/usr/bin/python3 -m pip install -q --find-links /wheels swe-rex -i https://pypi.tuna.tsinghua.edu.cn/simple && /usr/bin/python3 -m swerex.server --auth-token {token}"
       timeout: 600
-      startup_timeout: 600
+      startup_timeout: 1200
       container_runtime: docker
+      extra_run_args:
+        - "-v"
+        - "/data1/hgq/swe_wheels:/wheels:ro"
     env_variables:
       PIP_PROGRESS_BAR: "off"
       PIP_CACHE_DIR: "~/.cache/pip"

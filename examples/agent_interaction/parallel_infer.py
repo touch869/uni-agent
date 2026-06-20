@@ -66,7 +66,7 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = args.tensor_parallel_size
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
     config.actor_rollout_ref.rollout.max_num_seqs = args.max_num_seqs
-    config.actor_rollout_ref.rollout.max_model_len = min(args.prompt_length + args.response_length + 1024, 262144)
+    config.actor_rollout_ref.rollout.max_model_len = min(args.prompt_length + args.response_length + 1024, 70000)
     config.actor_rollout_ref.rollout.disable_log_stats = False  # expose vllm: metrics on /metrics for the router
 
     # Data configs
@@ -74,7 +74,7 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.data.max_prompt_length = args.prompt_length
     config.data.max_response_length = args.response_length
 
-    if "kvc_aware_router.yaml" in args.router_config_path:
+    if args.router_config_path and "kvc_aware_router.yaml" in args.router_config_path:
         # kv-cache config with hybrid KV cache manager for Mamba-Attention hybrid models
         vllm_kwargs = {
             "vllm": {
@@ -93,7 +93,10 @@ def init_config(args: argparse.Namespace) -> DictConfig:
 def run_inference(args: argparse.Namespace):
     """Run the inference pipeline using the provided arguments."""
     # 1. Init Ray
-    ray.init()
+    # Disable Ray's idle-worker reaper: agent workers hit idle gaps between
+    # task dispatch and the default ~10s idle threshold kills them, ending
+    # the job prematurely (only a few samples complete). Set a huge threshold.
+    ray.init(_system_config={"idle_worker_killing_time_threshold_ms": 999999999})
 
     # 2. Init rollout manager
     logger.info("Initializing configuration and AgentLoopManager...")
