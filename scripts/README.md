@@ -67,6 +67,22 @@ DEPLOYMENT 决定写入 parquet 的沙箱镜像名：
 
 输出文件：`scripts/swe_bench_verified_<deployment>.parquet`
 
+## 4.5 预下载 swe-rex wheels + 拉取 SWE-bench 镜像（首次必做）
+
+多并发推理时，每个沙箱都要 `pip install swe-rex`。500 个沙箱并发 pip 会把清华源打满（超时/卡死），且 Docker Hub 拉镜像国内超时。此脚本一次性解决两个问题：
+
+```bash
+bash scripts/pull_swebench_images.sh
+# 或指定数据集路径
+bash scripts/pull_swebench_images.sh scripts/swe_bench_verified_modal.parquet
+```
+
+脚本做两件事：
+1. **预下载 swe-rex + 全部依赖 wheels** 到 `/data1/hgq/swe_wheels`（26 个，5.5MB），沙箱挂载后 offline pip install（秒级，不走网络）。agent_config 已配置 `--find-links /wheels` + 清华 fallback（兼容 pydantic-core 等平台相关包）。
+2. **从火山引擎 CR 拉取 SWE-bench 镜像**（`enterprise-public-cn-beijing.cr.volces.com`，国内快），`docker tag` 成 `swebench/sweb.eval.x86_64.*:latest`（parquet 期望的格式）。跳过已有的镜像。
+
+> 不跑此脚本直接推理，会导致：pip install 慢/超时 + 镜像 pull Docker Hub 超时 → 沙箱起不来 → 大量样本 fail。
+
 ## 5. 运行推理
 
 ```bash
@@ -94,6 +110,46 @@ bash scripts/infer.sh /data/models/Qwen3-4B /data/dataset.parquet my_config.yaml
 > DATA_PATH 和 AGENT_CONFIG 一般不用配置，使用默认值即可
 
 脚本会在启动前检查以上三个路径是否存在，缺失则报错退出。
+
+## 5.5 多并发推理（全量 500 条，8 卡 data-parallel）
+
+`infer.sh` 是单并发 smoke test（2 卡、1 样本）。要跑全量 500 条 + 多并发，用 `scripts/infer_multi.sh`：
+
+```bash
+# 最简：只需指定模型路径
+bash scripts/infer_multi.sh /data/models/Qwen3-4B
+
+# 指定模型 + 数据集
+bash scripts/infer_multi.sh /data/models/Qwen3-4B /data/dataset.parquet
+
+# 通过环境变量调参（可选）
+MAX_SAMPLES=-1 TP=2 NWORKERS=8 MAX_NUM_SEQS=64 \
+  bash scripts/infer_multi.sh /data/models/Qwen3-4B
+```
+
+默认参数（适配 8×3090 / Qwen3-4B）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `MODEL_PATH` | `/path/to/Qwen3-4B` | 模型路径（第 1 个参数） |
+| `DATA_PATH` | `scripts/swe_bench_verified_modal.parquet` | 数据集路径（第 2 个参数） |
+| `AGENT_CONFIG` | `scripts/agent_config_localdocker.yaml` | Agent 配置（第 3 个参数） |
+| `NNODES` | `1` | 物理节点数（单机用 1，**不是 GPU 数**） |
+| `NGPUS` | `8` | 每节点 GPU 数 |
+| `TP` | `2` | tensor parallel；dp = NNODES × NGPUS / TP |
+| `NWORKERS` | `8` | agent rollout worker 数 |
+| `MAX_NUM_SEQS` | `64` | 每实例 vLLM 并发序列（24GB 卡用 64） |
+| `MAX_SAMPLES` | `-1` | 样本数（-1 = 全量 500） |
+| `MAX_TURNS` | `100` | 每样本最大交互轮数 |
+| `PROMPT_LEN` | `32768` | prompt 长度 |
+| `RESPONSE_LEN` | `65536` | response 长度 |
+
+> **前置条件**：必须先跑过 Step 4.5（预下载 wheels + 拉镜像），否则沙箱起不来。
+>
+> **日志重定向**：`infer_multi.sh` 输出到 stdout/stderr，自行重定向即可：
+> ```bash
+> setsid nohup bash scripts/infer_multi.sh /data/models/Qwen3-4B > logs/run.log 2>&1 &
+> ```
 
 ## 6. 已知问题：transformers / numpy 异常
 
