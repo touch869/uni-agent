@@ -33,6 +33,7 @@ TP=${TP:-2}                      # tensor parallel; dp = NGPUS*NNODES / TP
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-64} # per-replica vLLM concurrency; 256 on large-VRAM, 64 on 24GB
 MAX_TURNS=${MAX_TURNS:-100}
 MAX_SAMPLES=${MAX_SAMPLES:--1}   # -1 = full dataset
+TEMPERATURE=${TEMPERATURE:-0.8}  # sampling temperature; 0 = greedy (deterministic, RM comparable)
 PROMPT_LEN=${PROMPT_LEN:-32768}
 RESPONSE_LEN=${RESPONSE_LEN:-65536}
 
@@ -74,5 +75,6 @@ python ${PROJECT_ROOT}/examples/agent_interaction/parallel_infer.py \
     --prompt-length $PROMPT_LEN \
     --response-length $RESPONSE_LEN \
     --max-samples $MAX_SAMPLES \
+    --temperature $TEMPERATURE \
     --n 1 \
     "${ROUTER_ARGS[@]}"

@@ -288,13 +288,9 @@ class ZMQEventCollector(EventCollector):
         except zmq.ZMQError as e:
             logger.warning(f"replay ZMQ error for {node_id}: {e}")
 
+    @abstractmethod
     def _process_replay_data(self, data: bytes, node_id: str) -> None:
         """Parse replay response data (newline-delimited events)."""
-        if not data:
-            return
-        for line in data.splitlines():
-            if line.strip():
-                self._consume_payload(line, node_id)
 
     # ── Message consumption (abstract — subclass implements) ────────────
 

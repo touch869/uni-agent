@@ -10,6 +10,7 @@ docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
 
 docker run -d \
   --name ${CONTAINER_NAME} \
+  --net host \
   --gpus all \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
