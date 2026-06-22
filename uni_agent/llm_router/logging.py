@@ -13,6 +13,7 @@ duplicated across 4 llm_router files.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from loguru import logger
@@ -35,15 +36,21 @@ def _ensure_stdout_sink() -> None:
     global _stream_sink_id
     if _stream_sink_id is not None:
         return
-    # Check whether any StreamSink (stdout/stderr) handler already exists
-    # from async_logging's DEBUG_MODE setup — don't add a duplicate.
-    for h in logger._core.handlers.values():
+    _level = os.environ.get("ROUTER_LOG_LEVEL", "INFO").upper()
+    # Remove any existing stdout/stderr sinks whose level is below _level
+    # (e.g. loguru's default stderr DEBUG sink, or async_logging DEBUG_MODE sink)
+    # to prevent router DEBUG noise from leaking through them.
+    to_remove = []
+    for hid, h in logger._core.handlers.items():
         sink = h._sink
         if hasattr(sink, "_stream") and sink._stream in (sys.stdout, sys.stderr):
-            return
+            if h._levelno < logger.level(_level).no:
+                to_remove.append(hid)
+    for hid in to_remove:
+        logger.remove(hid)
     _stream_sink_id = logger.add(
         sys.stdout,
-        level="INFO",
+        level=_level,
         format="{time:YYYY-MM-DD HH:mm:ss} | {extra[name]: <20} | {level: <8} | {message}",
     )
 
