@@ -75,7 +75,8 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.data.max_response_length = args.response_length
 
     if args.router_config_path and "kvc_aware_router.yaml" in args.router_config_path:
-        # kv-cache config with hybrid KV cache manager for Mamba-Attention hybrid models
+        # Enable KV event publishing (ZMQ) for the KVCAwareBalancer to collect
+        # block-level KV cache info from each vLLM replica.
         vllm_kwargs = {
             "vllm": {
                 "kv-events-config": {
@@ -85,6 +86,18 @@ def init_config(args: argparse.Namespace) -> DictConfig:
                 }
             }
         }
+        # Optionally enable MooncakeStoreConnector for cross-replica KV sharing.
+        # This allows prefix KV blocks to be shared between dp replicas via mooncake
+        # TransferEngine, reducing cold-start prefill on cache misses.
+        if os.environ.get("ENABLE_MOONCAKE", "").lower() in ("1", "true", "yes"):
+            vllm_kwargs["vllm"]["kv_transfer_config"] = {
+                "kv_connector": "MooncakeStoreConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "protocol": "tcp",
+                    "local_storage_path": "/tmp/mooncake_storage",
+                },
+            }
         config.actor_rollout_ref.rollout.engine_kwargs = vllm_kwargs
 
     return config
