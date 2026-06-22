@@ -1,0 +1,9 @@
+[36m(vLLMHttpServer pid=111621)[0m (Worker pid=111957) INFO 06-21 21:13:23 [factory.py:62] Creating v1 connector with name: MooncakeStoreConnector and engine_id: 0ad13c87-235f-4f1f-9635-a8b2396a51d6
+[36m(vLLMHttpServer pid=111621)[0m (EngineCore pid=111907) INFO 06-21 21:13:26 [factory.py:62] Creating v1 connector with name: MooncakeStoreConnector and engine_id: 0ad13c87-235f-4f1f-9635-a8b2396a51d6
+[36m(vLLMHttpServer pid=111627)[0m (Worker pid=111963) INFO 06-21 21:13:24 [factory.py:62] Creating v1 connector with name: MooncakeStoreConnector and engine_id: aace3e5d-e6de-4c76-b459-0dfbb3a0d934
+[36m(vLLMHttpServer pid=111627)[0m (EngineCore pid=111900) INFO 06-21 21:13:26 [factory.py:62] Creating v1 connector with name: MooncakeStoreConnector and engine_id: aace3e5d-e6de-4c76-b459-0dfbb3a0d934
+=> Mean RM Score: 0.0000
+=== counts ===
+BlockStored_count: 22309
+NO_HANDLE_count: 19
+EngineDeadErr_count: 0
