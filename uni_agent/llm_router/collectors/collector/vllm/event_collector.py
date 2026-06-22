@@ -41,6 +41,41 @@ class VLLMKVEventCollector(ZMQEventCollector):
         super().__init__(config, kv_event_addresses=kv_event_addresses)
         self.remote_to_local_block_hash: dict[str, str] = {}
 
+    def _process_replay_data(self, data: bytes, node_id: str) -> None:
+        """Parse vLLM replay data — concatenated raw ZMQ publication frames.
+
+        vLLM's replay socket returns buffered ZMQ PUB frames concatenated:
+            b"kv-events" + msgpack([ts, [[event]]]) + b"kv-events" + ...
+
+        Each byte of the topic b"kv-events" is an ASCII value < 0x80, so
+        msgpack.Unpacker decodes each topic byte as a positive fixint (int).
+        The actual event payload starts with a fixarray byte (0x90-0x9f),
+        which Unpacker correctly decodes as a list.
+
+        We skip any non-list items (topic ints) and process only the list
+        items (event payloads).
+        """
+        if not data:
+            return
+        unpacker = msgpack.Unpacker(raw=False)
+        unpacker.feed(data)
+        count = 0
+        try:
+            for raw_data in unpacker:
+                if not isinstance(raw_data, (list, tuple)):
+                    continue  # topic bytes decoded as fixints — skip
+                try:
+                    events = KVCacheEvent.from_raw(raw_data, default_replica_id=node_id)
+                    logger.debug(f"replay: {len(events)} event(s) from {node_id}")
+                    for event in events:
+                        self._apply_event(event, default_replica_id=node_id)
+                    count += 1
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"replay: failed to parse event from {node_id}: {e}")
+        except msgpack.UnpackException as e:
+            logger.warning(f"replay: msgpack stream error from {node_id}: {e}")
+        logger.debug(f"replay: processed {count} event(s) from {node_id}")
+
     def _consume_payload(self, payload: bytes, node_id: str) -> None:
         """Decode msgpack payload, apply events to store.
 

@@ -42,6 +42,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_UNIT=false
 RUN_POLLING=false
 RUN_KV_EVENT=false
+RUN_PROVIDER=false
 RUN_ALL=true          # true when no specific flags are given
 
 for arg in "$@"; do
@@ -49,10 +50,11 @@ for arg in "$@"; do
         --unit)      RUN_ALL=false; RUN_UNIT=true ;;
         --polling)   RUN_ALL=false; RUN_POLLING=true ;;
         --kv-event)  RUN_ALL=false; RUN_KV_EVENT=true ;;
+        --provider)  RUN_ALL=false; RUN_PROVIDER=true ;;
     esac
 done
 
-if $RUN_ALL; then RUN_UNIT=true; RUN_POLLING=true; RUN_KV_EVENT=true; fi
+if $RUN_ALL; then RUN_UNIT=true; RUN_POLLING=true; RUN_KV_EVENT=true; RUN_PROVIDER=true; fi
 
 echo "=== llm_router CI tests ==="
 echo "  Model        : ${VLLM_MODEL}"
@@ -83,6 +85,12 @@ if $RUN_KV_EVENT; then
     echo "--- Phase 2b: KVEventCollector integration ---"
     VLLM_PORT=${VLLM_PORT} ZMQ_SUB_PORT=${ZMQ_SUB_PORT} ZMQ_REPLAY_PORT=${ZMQ_REPLAY_PORT} \
         python -m pytest "${SCRIPT_DIR}/collectors/test_vllm_kv_event_collector.py" -v
+fi
+
+if $RUN_PROVIDER; then
+    echo "--- Phase 2c: RouteDataProvider.get_gpu_prefix_hit_rate integration ---"
+    VLLM_PORT=${VLLM_PORT} ZMQ_SUB_PORT=${ZMQ_SUB_PORT} ZMQ_REPLAY_PORT=${ZMQ_REPLAY_PORT} \
+        python -m pytest "${SCRIPT_DIR}/collectors/test_route_data_provider_gpu_prefix_hit_rate.py" -v
 fi
 
 echo "=== All tests done ==="
