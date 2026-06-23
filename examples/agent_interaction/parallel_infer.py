@@ -64,7 +64,7 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.response_length = args.response_length
     config.actor_rollout_ref.rollout.n = args.n
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = args.tensor_parallel_size
-    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
+    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.91
     config.actor_rollout_ref.rollout.max_num_seqs = args.max_num_seqs
     config.actor_rollout_ref.rollout.max_model_len = min(args.prompt_length + args.response_length + 1024, 70000)
     config.actor_rollout_ref.rollout.disable_log_stats = False  # expose vllm: metrics on /metrics for the router
