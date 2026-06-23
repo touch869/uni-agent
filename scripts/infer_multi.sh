@@ -35,6 +35,7 @@ MAX_TURNS=${MAX_TURNS:-100}
 MAX_SAMPLES=${MAX_SAMPLES:--1}   # -1 = full dataset
 PROMPT_LEN=${PROMPT_LEN:-32768}
 RESPONSE_LEN=${RESPONSE_LEN:-65536}
+TEMPERATURE=${TEMPERATURE:-0.8}  # sampling temperature; 0 = greedy (deterministic, RM comparable
 
 # Use all GPUs by default (override with CUDA_VISIBLE_DEVICES=N,N,... if shared machine)
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
@@ -74,5 +75,6 @@ python ${PROJECT_ROOT}/examples/agent_interaction/parallel_infer.py \
     --prompt-length $PROMPT_LEN \
     --response-length $RESPONSE_LEN \
     --max-samples $MAX_SAMPLES \
+    --temperature $TEMPERATURE \
     --n 1 \
     "${ROUTER_ARGS[@]}"
