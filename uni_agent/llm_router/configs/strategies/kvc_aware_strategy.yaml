@@ -2,7 +2,17 @@
 _target_: uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig
 weight: 1.0
 alpha: 0.7
-load_threshold: 0.1
+load_threshold: 0.9
+
+# Capacity-based load scoring toggle and parameters.
+# S_load uses a
+# weighted combination of (1-kv_usage), (1-running_ratio), (1-queue_fraction).
+# max_num_seqs is read from env var MAX_NUM_SEQS (default 1024).
+use_capacity_load: true
+w_kv: 0.5
+w_run: 0.3
+w_queue: 0.2
+
 layer_weights:
     cpu: 1.0
     ssd: 0.25
