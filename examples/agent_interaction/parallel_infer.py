@@ -96,13 +96,20 @@ def init_config(args: argparse.Namespace) -> DictConfig:
         # This allows prefix KV blocks to be shared between dp replicas via mooncake
         # TransferEngine, reducing cold-start prefill on cache misses.
         if os.environ.get("ENABLE_MOONCAKE", "").lower() in ("1", "true", "yes"):
+            # MooncakeStoreConnector shares KV across dp replicas via a shared
+            # mooncake master. Per vllm docs (mooncake_store_connector_usage.md)
+            # the connector reads the JSON config from MOONCAKE_CONFIG_PATH env;
+            # verl's rollout_kv_offload.md also accepts it via verl-side
+            # `kv_connector_extra_config.mooncake_config_path` — set both for
+            # robustness. master must be started separately (mooncake_master).
+            # PYTHONHASHSEED=0 (set in infer_multi.sh/sweep) keeps block hashes
+            # consistent across DP ranks so prefix cache actually hits.
+            mc_cfg = os.environ.get("MOONCAKE_CONFIG_PATH", "/data1/hgq/mooncake_config.json")
             vllm_kwargs["vllm"]["kv_transfer_config"] = {
                 "kv_connector": "MooncakeStoreConnector",
                 "kv_role": "kv_both",
-                "kv_buffer_device": "cpu",
                 "kv_connector_extra_config": {
-                    "protocol": "tcp",
-                    "local_storage_path": "/tmp/mooncake_storage",
+                    "mooncake_config_path": mc_cfg,
                 },
             }
         config.actor_rollout_ref.rollout.engine_kwargs = vllm_kwargs
