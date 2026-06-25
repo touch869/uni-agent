@@ -39,11 +39,16 @@ class KVCAwareConfig:
         strategies: Polymorphic strategy list (each with ``_target_``).
         collector: Collector module connection-type tuning config.
         cache_store: CacheStore configuration.
+        sticky_max_size: Capacity of the request_id→replica sticky-session LRU
+            table. Bound conversations stay affinity-bound to their replica
+            until it is removed or evicted by LRU. Default 10000 (mirrors verl
+            ``DEFAULT_ROUTING_CACHE_SIZE``).
     """
 
     strategies: list[StrategyConfig]  # required, no default
     collector: CollectorConfig = field(default_factory=lambda: _DEFAULT_COLLECTOR)
     cache_store: CacheStoreConfig = field(default_factory=lambda: _DEFAULT_CACHE_STORE)
+    sticky_max_size: int = 10000
 
     @classmethod
     def from_config(cls, cfg: DictConfig | dict) -> KVCAwareConfig:
@@ -103,9 +108,11 @@ class KVCAwareConfig:
         if isinstance(config_obj, dict):
             collector_cfg = config_obj.get("collector") or CollectorConfig()
             cache_store_cfg = config_obj.get("cache_store") or CacheStoreConfig()
+            sticky_max_size = config_obj.get("sticky_max_size", 10000)
         else:
             collector_cfg = getattr(config_obj, "collector", None) or CollectorConfig()
             cache_store_cfg = getattr(config_obj, "cache_store", None) or CacheStoreConfig()
+            sticky_max_size = getattr(config_obj, "sticky_max_size", 10000)
 
         # ── Step 2: parse strategies (polymorphic list) ────────────
         if strategies_raw is None:
@@ -119,6 +126,7 @@ class KVCAwareConfig:
             strategies=strategies,
             collector=collector_cfg,
             cache_store=cache_store_cfg,
+            sticky_max_size=int(sticky_max_size),
         )
         result.validate()
         return result
@@ -137,6 +145,9 @@ class KVCAwareConfig:
                 errors.append(
                     f"sum of strategy weights must be ~1.0, got {total_weight}"
                 )
+
+        if self.sticky_max_size <= 0:
+            errors.append(f"sticky_max_size must be > 0, got {self.sticky_max_size}")
 
         if errors:
             raise ConfigError("; ".join(errors))

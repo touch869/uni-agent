@@ -102,32 +102,34 @@ class TestStrategyNormalInput:
         cfg = KVCAwareStrategyConfig(weight=1.0, load_threshold=0.5, collector_names=_CN)
         assert cfg.load_threshold == 0.5
 
-    def test_s08_load_threshold_default_0_1(self):
+    def test_s08_load_threshold_default_0_9(self):
         """
         Feature: load_threshold uses default when omitted
         Description: construct KVCAwareStrategyConfig without load_threshold
-        Expectation: cfg.load_threshold == 0.1
+        Expectation: cfg.load_threshold == 0.9 (load ceiling; overload when load > threshold)
         """
         cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.load_threshold == 0.1
+        assert cfg.load_threshold == 0.9
 
     def test_s09_layer_weights_dict(self):
         """
-        Feature: layer_weights custom dict parses normally
-        Description: construct strategy config with layer_weights={"cpu":1.0,"ssd":0.25}
-        Expectation: cfg.layer_weights == {"cpu": 1.0, "ssd": 0.25}
+        Feature: layer_weights custom dict parses normally (three tiers: gpu/cpu/ssd)
+        Description: construct strategy config with layer_weights={"gpu":0.7,"cpu":0.2,"ssd":0.1}
+        Expectation: cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
         """
-        cfg = KVCAwareStrategyConfig(weight=1.0, layer_weights={"cpu": 1.0, "ssd": 0.25}, collector_names=_CN)
-        assert cfg.layer_weights == {"cpu": 1.0, "ssd": 0.25}
+        cfg = KVCAwareStrategyConfig(
+            weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}, collector_names=_CN
+        )
+        assert cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
 
     def test_s10_layer_weights_default(self):
         """
         Feature: layer_weights uses default when omitted
         Description: construct KVCAwareStrategyConfig without layer_weights
-        Expectation: cfg.layer_weights == {"cpu": 1.0, "ssd": 0.25}
+        Expectation: cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
         """
         cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.layer_weights == {"cpu": 1.0, "ssd": 0.25}
+        assert cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
 
     def test_s11_collector_names_bind(self):
         """
@@ -239,23 +241,49 @@ class TestStrategyAbnormalInput:
         with pytest.raises(ConfigError, match="load_threshold"):
             KVCAwareStrategyConfig(weight=1.0, load_threshold=80, collector_names=_CN)
 
-    def test_s20_layer_weights_non_cpu_ssd_key(self):
+    def test_s20_layer_weights_non_gpu_cpu_ssd_key(self):
         """
         Feature: layer_weights with illegal key triggers validation error
         Description: construct strategy config with a "disk" key in layer_weights
         Expectation: raises ConfigError matching "layer_weights"
         """
         with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(weight=1.0, layer_weights={"cpu": 1.0, "disk": 0.5}, collector_names=_CN)
+            KVCAwareStrategyConfig(
+                weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "disk": 0.1}, collector_names=_CN
+            )
 
     def test_s21_layer_weights_missing_key(self):
         """
-        Feature: layer_weights missing a required key triggers validation error
-        Description: construct strategy config with layer_weights containing only "cpu"
+        Feature: layer_weights missing a required tier triggers validation error
+        Description: construct strategy config with layer_weights missing "ssd"
         Expectation: raises ConfigError matching "layer_weights"
         """
         with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(weight=1.0, layer_weights={"cpu": 1.0}, collector_names=_CN)
+            KVCAwareStrategyConfig(
+                weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.3}, collector_names=_CN
+            )
+
+    def test_s21b_layer_weights_sum_below_one(self):
+        """
+        Feature: layer_weights values summing below 1.0 trigger validation error
+        Description: construct strategy config with weights summing to 0.8
+        Expectation: raises ConfigError matching "layer_weights"
+        """
+        with pytest.raises(ConfigError, match="layer_weights"):
+            KVCAwareStrategyConfig(
+                weight=1.0, layer_weights={"gpu": 0.5, "cpu": 0.2, "ssd": 0.1}, collector_names=_CN
+            )
+
+    def test_s21c_layer_weights_sum_above_one(self):
+        """
+        Feature: layer_weights values summing above 1.0 trigger validation error
+        Description: construct strategy config with weights summing to 1.1
+        Expectation: raises ConfigError matching "layer_weights"
+        """
+        with pytest.raises(ConfigError, match="layer_weights"):
+            KVCAwareStrategyConfig(
+                weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.2}, collector_names=_CN
+            )
 
     def test_s22_collector_names_not_list_type(self):
         """
@@ -365,8 +393,8 @@ class TestStrategyHydraNormal:
         from hydra.utils import instantiate
         result = instantiate(entry)
         assert result.alpha == 0.7
-        assert result.load_threshold == 0.1
-        assert result.layer_weights == {"cpu": 1.0, "ssd": 0.25}
+        assert result.load_threshold == 0.9
+        assert result.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
         assert result.collector_names == ["vllm_zmq"]
 
 
@@ -1108,8 +1136,8 @@ class TestKVCAwareOther:
         assert isinstance(strategy, KVCAwareStrategyConfig)
         assert strategy.weight == 1.0
         assert strategy.alpha == 0.7
-        assert strategy.load_threshold == 0.1
-        assert strategy.layer_weights == {"cpu": 1.0, "ssd": 0.25}
+        assert strategy.load_threshold == 0.9
+        assert strategy.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
         assert strategy.collector_names == ["vllm_zmq", "vllm_metrics"]
         assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
         assert result.collector.long_connection == {

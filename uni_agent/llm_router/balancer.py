@@ -23,7 +23,12 @@ from typing import Any
 from uni_agent.llm_router.collectors.provider import RouteDataProvider
 from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.logging import get_router_logger
-from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
+from uni_agent.llm_router.strategies import (
+    ReplicaInfo,
+    StrategyRegistry,
+    StickySessionTable,
+    route,
+)
 
 logger = get_router_logger("balancer")
 
@@ -41,6 +46,11 @@ class KVCAwareBalancer:
         ]
         self._servers: dict[str, Any] = dict(servers)
         self._route_calls = 0
+        # Sticky-session LRU table: request_id → replica_id. Owned by the
+        # Balancer (single Ray actor, serial acquire_server → no locking
+        # needed) and threaded into route()→strategy.score() so a strategy can
+        # short-circuit to a bound, non-overloaded replica.
+        self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
         self._init_provider()
 
     def _init_provider(self) -> None:
@@ -99,6 +109,7 @@ class KVCAwareBalancer:
             "provider": type(self._provider).__name__,
             "strategies": [{"type": type(s).__name__, "weight": w} for s, w in self._strategies],
             "route_calls": self._route_calls,
+            "sticky_size": len(self._sticky),
         }
 
     def release_server(self, server_id: str) -> None:
@@ -112,13 +123,24 @@ class KVCAwareBalancer:
         Builds ``ReplicaInfo`` candidates from the pool, asks ``route()`` for a
         best-first ranking, and returns ``(ranking[0], handle)``. Raises
         ``RuntimeError`` if no replica is available (empty pool or all blacklisted).
+
+        The ``request_id`` and the sticky-session table are forwarded to
+        ``route()`` so strategies can short-circuit to a bound, non-overloaded
+        replica. After a ranking is chosen, the binding is refreshed so the
+        next turn of the same ``request_id`` stays affinity-bound (or, when a
+        sticky replica was overloaded and routing fell back, rebinds to the
+        new choice).
         """
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
-        ranking = route(self._strategies, prompt_ids, self._provider, replicas)
+        ranking = route(
+            self._strategies, prompt_ids, self._provider, replicas,
+            request_id, self._sticky,
+        )
         if not ranking:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
+        self._sticky.put(request_id, server_id)
         logger.info(
             f"request={request_id} routed to server={server_id} (ranking={ranking}, pool={list(self._servers)})",
         )
@@ -134,6 +156,14 @@ class KVCAwareBalancer:
             self._servers[sid] = handle
 
     def remove_servers(self, server_ids: list[str]) -> None:
-        """Bulk-remove servers from the pool (provider is not keyed by the pool)."""
+        """Bulk-remove servers from the pool (provider is not keyed by the pool).
+
+        Also invalidates every sticky binding pointing at a removed server so a
+        subsequent ``acquire_server`` for a bound conversation doesn't try to
+        short-circuit to a dead replica (the strategy would reject it and fall
+        back to combined scoring anyway, but clearing early keeps the table
+        clean and the logs honest).
+        """
         for sid in server_ids:
             self._servers.pop(sid, None)
+            self._sticky.invalidate_replica(sid)

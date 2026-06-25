@@ -29,8 +29,17 @@ class RoutingStrategy(Protocol):
         prompt_ids: list[int] | None,
         provider: Any,
         replicas: list[Any],
+        request_id: str | None = None,
+        sticky_table: Any = None,
     ) -> list[float]:
-        """Score each replica. Larger is better; negatives are allowed."""
+        """Score each replica. Larger is better; negatives are allowed.
+
+        ``request_id`` + ``sticky_table`` enable sticky-session short-circuit:
+        a strategy may return a pre-built score list that places the bound
+        replica first when it is not overloaded (see ``KVCacheAwareStrategy``).
+        Strategies that ignore stickiness should accept the kwargs and proceed
+        with their own scoring.
+        """
         ...
 
 
@@ -44,6 +53,8 @@ def route(
     prompt_ids: list[int] | None,
     provider: Any,
     replicas: list[Any],
+    request_id: str | None = None,
+    sticky_table: Any = None,
 ) -> list[str]:
     """Return replica ids ranked best-first.
 
@@ -56,6 +67,8 @@ def route(
         prompt_ids: prompt token ids (content-aware routing; may be ``None``).
         provider: ``RouteDataProvider`` for metric queries.
         replicas: ``[ReplicaInfo, ...]`` — candidate replicas.
+        request_id: session id for sticky-session routing (may be ``None``).
+        sticky_table: ``StickySessionTable`` for sticky lookups (may be ``None``).
 
     Returns:
         Replica ids sorted by total score, best first. Falls back to random
@@ -72,7 +85,9 @@ def route(
     for strategy, weight in strategies:
         name = type(strategy).__name__
         try:
-            scores = strategy.score(prompt_ids, provider, replicas)
+            scores = strategy.score(
+                prompt_ids, provider, replicas, request_id, sticky_table,
+            )
             if len(scores) != n:
                 raise ValueError(f"{name}.score() returned {len(scores)} scores, expected {n}")
         except Exception as exc:  # noqa: BLE001
