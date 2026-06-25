@@ -2,12 +2,14 @@
 
 Strategy layers call ``RouteDataProvider`` methods to get metrics data.
 It delegates to store instances (``MetricsStore`` for polling metrics,
-``KVCacheStore`` for GPU prefix cache data) created via the registry.
+``KVCacheStore`` for GPU prefix cache data).
 
-Collectors and stores are created from ``BUILTIN_REGISTRY`` based on
-``collection_names``.  Stores are deduplicated by class — the same
-store class is only instantiated once and shared across all collectors
-that reference it.
+Each collector creates its own store instance in ``__init__`` via
+``store_cls()``.  Stores are singletons — calling ``MetricsStore()``
+or ``KVCacheStore()`` always returns the shared instance, so dedup
+happens automatically at the store level, not in the provider.
+
+All query computations are delegated to the respective store classes.
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ from __future__ import annotations
 from typing import Any
 
 from uni_agent.llm_router.config.router import CollectorConfig
-from uni_agent.llm_router.collectors.hash import get_prefix_hashes
+from uni_agent.llm_router.collectors.collector.polling_collector import PollingCollector
+from uni_agent.llm_router.collectors.collector.event_collector import EventCollector
 from uni_agent.llm_router.collectors.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.collectors.store.metrics_store import MetricsStore
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
@@ -24,12 +27,11 @@ from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 class RouteDataProvider:
     """Unified query entry point — strategies use this to access all metrics.
 
-    ``RouteDataProvider`` creates collectors and stores. Stores are
-    deduplicated by class so that e.g. all polling collectors share
-    the same ``MetricsStore`` instance.
+    ``RouteDataProvider`` creates collectors.  Store deduplication is
+    handled by the store classes themselves (singleton pattern) — no
+    manual dedup needed here.
 
-    Query computations (prefix hit rate) are implemented here — they read
-    from ``KVCacheStore`` data fields.
+    All query computations are delegated to the respective store classes.
 
     Args:
         collectors_config: ``CollectorConfig`` — provides common settings
@@ -41,39 +43,47 @@ class RouteDataProvider:
     def __init__(
         self,
         collectors_config,
-        collection_names
+        collection_names,
+        server_addresses: dict[str, str] | None = None,
+        kv_event_endpoints: dict[str, list[str]] | None = None,
     ) -> None:
-        self._collection_names = collection_names
-
-        # ── Create stores (deduplicated by class) and collectors ────────
-        self._stores: dict[type, Any] = {}
-        self._collectors: list = []
+        self._collectors: list[Any] = []
         for name in collection_names:
-            store_cls = BUILTIN_REGISTRY.get_store(name)
-            if store_cls not in self._stores:
-                self._stores[store_cls] = store_cls()
             collector_cls = BUILTIN_REGISTRY.get_collector(name)
-            self._collectors.append(collector_cls(config=collectors_config))
+            if issubclass(collector_cls, PollingCollector):
+                self._collectors.append(
+                    collector_cls(config=collectors_config, server_addresses=server_addresses)
+                )
+            elif issubclass(collector_cls, EventCollector):
+                self._collectors.append(
+                    collector_cls(config=collectors_config, kv_event_addresses=kv_event_endpoints)
+                )
+            else:
+                raise TypeError(f"unsupport collector: {collector_cls}.")
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Start all collectors, binding each to its deduplicated store."""
-        for name, collector in zip(self._collection_names, self._collectors):
-            store_cls = BUILTIN_REGISTRY.get_store(name)
-            collector.start(store=self._stores[store_cls])
+        """Start all collectors."""
+        for collector in self._collectors:
+            collector.start()
+
+    def stop(self) -> None:
+        """Stop all collectors and await their cleanup."""
+        for collector in self._collectors:
+            collector.stop()
 
     # ── Convenience accessors for commonly-used stores ────────────────
 
     @property
     def _metrics_store(self) -> MetricsStore:
-        """Get the shared MetricsStore instance."""
-        return self._stores[MetricsStore]
+        """Get the shared MetricsStore singleton."""
+        return MetricsStore.default()
 
     @property
     def _kv_store(self) -> KVCacheStore:
-        """Get the shared KVCacheStore instance."""
-        return self._stores[KVCacheStore]
+        """Get the shared KVCacheStore singleton."""
+        return KVCacheStore.default()
 
     # ── Generic polling metric queries (canonical key) ──────────────────
 
@@ -109,66 +119,15 @@ class RouteDataProvider:
     def get_gpu_prefix_hit_rate(self, prompt_ids: list[int]) -> dict[str, int]:
         """Match prefix hashes against cached blocks, return per-replica hit percent.
 
-        Algorithm (matching aibrix ``MatchPrefix``):
-            1. Compute prefix hashes via ``get_prefix_hashes``
-            2. For each prefix hash, check ``replicas_by_block`` to find replicas
-            3. Stop at first hash where no replica matches (chain break)
-            4. Compute percent = (matched_count * 100) // total_hashes
-
-        Args:
-            prompt_ids: Current request's prompt token IDs.
-
-        Returns:
-            Dict of replica_id → prefix_match_percent (0–100).
-            Empty dict if block_size is unknown or no full blocks.
+        Delegates to ``KVCacheStore.get_gpu_prefix_hit_rate(prompt_ids)``.
         """
-        kv_store = self._kv_store
-
-        if kv_store.block_size is None:
-            return {}
-
-        prefix_hashes = get_prefix_hashes(prompt_ids, kv_store.block_size)
-        if not prefix_hashes:
-            return {}
-
-        hash_strs = [str(h) for h in prefix_hashes]
-
-        # Sequential prefix matching (aibrix MatchPrefix pattern)
-        prefix_match_replicas: dict[str, int] = {}
-
-        for i, hs in enumerate(hash_strs):
-            cached_replicas = kv_store.replicas_by_block.get(hs)
-            if cached_replicas is None or len(cached_replicas) == 0:
-                break  # chain break — no replica caches this hash
-
-            prefix_match_percent = (i + 1) * 100 // len(hash_strs)
-
-            # Record percent for all replicas that have this hash
-            for replica_id in cached_replicas:
-                prefix_match_replicas[replica_id] = prefix_match_percent
-
-        return prefix_match_replicas
+        return self._kv_store.get_gpu_prefix_hit_rate(prompt_ids)
 
     def get_tier_prefix_hit_rate(
         self, node_id: str, prompt_ids: list[int], tier: str,
     ) -> float:
         """Query tier-level prefix cache hit rate (slow-path data).
 
-        v1: reads from snapshot (PollingCollector for Mooncake metrics).
-        v2: calls Mooncake /batch_query_keys API for real-time query.
-
-        Args:
-            node_id: Target node.
-            prompt_ids: Current request's prompt token IDs.
-            tier: ``"cpu"`` or ``"ssd"``.
-
-        Returns:
-            Hit rate 0.0–1.0; returns 0.0 if no data in snapshot.
+        Delegates to ``KVCacheStore.get_tier_prefix_hit_rate``.
         """
-        # v1 placeholder — read from snapshot when tier metrics are available
-        return 0.0
-
-    def stop(self) -> None:
-        """Stop all collectors and clean up."""
-        for collector in self._collectors:
-            collector.stop()
+        return self._kv_store.get_tier_prefix_hit_rate(node_id, prompt_ids, tier)
