@@ -34,8 +34,16 @@ TP=${TP:-2}                      # tensor parallel; dp = NGPUS*NNODES / TP
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-64} # per-replica vLLM concurrency; 256 on large-VRAM, 64 on 24GB
 MAX_TURNS=${MAX_TURNS:-100}
 MAX_SAMPLES=${MAX_SAMPLES:--1}   # -1 = full dataset
-PROMPT_LEN=${PROMPT_LEN:-32768}
-RESPONSE_LEN=${RESPONSE_LEN:-65536}
+# PROMPT_LEN + RESPONSE_LEN sets the 1-token-degradation threshold (verl
+# vllm_async_server max_tokens = min(response_length, prompt_length +
+# response_length - prompt); once agent multi-turn prompt reaches this sum,
+# max_tokens collapses to 1 → degradation loop). Keep the sum ≤ 39936 for
+# Qwen3-8B: verl max_model_len = min(PROMPT_LEN+RESPONSE_LEN+1024, 70000),
+# and the +1024 must not exceed the native 40960 context or vLLM rejects
+# startup. PROMPT_LEN large is safe (only caps output postprocess truncation,
+# not generation); RESPONSE_LEN=8192 is enough for Qwen3 reasoning per step.
+PROMPT_LEN=${PROMPT_LEN:-31744}
+RESPONSE_LEN=${RESPONSE_LEN:-8192}
 
 # Use all GPUs by default (override with CUDA_VISIBLE_DEVICES=N,N,... if shared machine)
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
