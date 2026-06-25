@@ -8,6 +8,7 @@ and process ZMQ messages.
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import abstractmethod
 
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ import zmq.asyncio
 
 from uni_agent.llm_router.config.router import CollectorConfig
 from uni_agent.llm_router.collectors.collector.event_collector import EventCollector
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,19 +48,24 @@ class ZMQEventCollector(EventCollector):
                 kv_event_address (``{replica_id: [sub_addr, replay_addr]}``).
     """
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: CollectorConfig, kv_event_addresses: dict[str, list[str]] | None = None) -> None:
         super().__init__()
         self._topic = "kv-events"
-        self._base_retry_delay = config.retry_interval
-        self._max_retry_delay = 30.0
-        self._max_retry_attempts = config.max_retries
-        self._retry_backoff_factor = 2.0
+
+        long_conn = config.long_connection
+        self._base_retry_delay = long_conn["base_retry_delay"]
+        self._max_retry_delay = long_conn["max_retry_delay"]
+        self._max_retry_attempts = long_conn["max_retry_attempts"]
+        self._retry_backoff_factor = long_conn["retry_backoff_factor"]
+
         # Parse kv_event_address: {replica_id: [sub_ip:port, replay_ip:port]}
+        addresses = kv_event_addresses or {}
         self._sub_endpoints: dict[str, str] = {}
         self._replay_endpoints: dict[str, str] = {}
-        for replica_id, addresses in config.kv_event_address.items():
-            self._sub_endpoints[replica_id] = f"tcp://{addresses[0]}"
-            self._replay_endpoints[replica_id] = f"tcp://{addresses[1]}"
+        for replica_id, addrs in addresses.items():
+            self._sub_endpoints[replica_id] = f"tcp://{addrs[0]}"
+            self._replay_endpoints[replica_id] = f"tcp://{addrs[1]}"
+
         self._stopped = False
         # Per-replica socket bundles
         self._replica_sockets: dict[str, _ReplicaSocketSet] = {}
@@ -67,13 +75,38 @@ class ZMQEventCollector(EventCollector):
         self._sub_tasks: dict[str, asyncio.Task] = {}
 
     def stop(self) -> None:
-        """Stop ZMQ subscription and close all sockets."""
+        """Stop ZMQ subscription, await all tasks, and close all sockets.
+
+        Synchronous — blocks until all async cleanup completes on the
+        event-loop thread.
+        """
         self._stopped = True
-        super().stop()  # cancels self._task
+        # Cancel per-replica subscription tasks
         for task in self._sub_tasks.values():
             task.cancel()
+        # Block until each task finishes (they run on self._loop)
+        for task in self._sub_tasks.values():
+            try:
+                # Schedule a call that simply waits for the task to finish,
+                # then block on the resulting Future from the caller thread.
+                done_future = asyncio.run_coroutine_threadsafe(
+                    self._wait_task(task), self._loop,
+                )
+                done_future.result(timeout=10)
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug("Error waiting for sub task to finish: %s", exc)
         self._sub_tasks.clear()
+        # Then stop the base EventCollector (cancels main task, stops loop)
+        super().stop()
+        # Finally close ZMQ sockets after all tasks have exited
         self._close_all_zmq_sockets()
+
+    async def _wait_task(self, task: asyncio.Task) -> None:
+        """Await a task on the event-loop thread — used by stop() for blocking wait."""
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     # ── ZMQ connection management ───────────────────────────────────────
 
@@ -100,7 +133,8 @@ class ZMQEventCollector(EventCollector):
             self._retry_counts[node_id] = 0
             return True
 
-        except zmq.ZMQError:
+        except zmq.ZMQError as exc:
+            logger.warning("ZMQ connection error for node %s: %s", node_id, exc)
             self._close_zmq_sockets_for(node_id)
             return False
 
@@ -210,8 +244,8 @@ class ZMQEventCollector(EventCollector):
 
             self._process_replay_data(replay_data, node_id)
 
-        except zmq.ZMQError:
-            pass
+        except zmq.ZMQError as exc:
+            logger.warning("ZMQ replay error for node %s: %s", node_id, exc)
 
     def _process_replay_data(self, data: bytes, node_id: str) -> None:
         """Parse replay response data (newline-delimited events)."""

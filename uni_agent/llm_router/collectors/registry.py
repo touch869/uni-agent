@@ -1,66 +1,70 @@
-"""Registry — unified registry for collector classes and store classes.
+"""Registry — lazy registry for collector classes.
 
-Maps ``collection_name`` keys (e.g. ``"vllm_metrics"``, ``"vllm_zmq"``)
-to concrete collector classes and store classes.  External callers can
-register new backends via ``register_collector`` / ``register_store``.
-
-``BUILTIN_REGISTRY`` is the module-level instance with pre-registered
-built-in entries.
+Built-in entries are registered as ``collection_name → "module.path:ClassName"``
+strings.  The store class is derived from the collector's ``store_cls``
+attribute — no separate store registration needed.
 """
 
 from __future__ import annotations
 
-from uni_agent.llm_router.collectors.store.kv_cache_store import KVCacheStore
-from uni_agent.llm_router.collectors.store.metrics_store import MetricsStore
-from uni_agent.llm_router.collectors.collector.vllm.event_collector import VLLMKVEventCollector
-from uni_agent.llm_router.collectors.collector.vllm.polling_collector import VLLMPollingCollector
+import importlib
 
 
 class Registry:
-    """Unified registry — collector and store classes share the same key space.
+    """Lazy registry — maps collection_name to collector class.
 
-    The key is the ``collection_name`` (e.g. ``"vllm_metrics"``), which
-    maps to both a collector class and a store class.  This allows
-    ``RouteDataProvider`` to look up both from a single ``collection_names``
-    list.
+    ``register_entry(name, collector_path)`` stores a
+    ``"module.path:ClassName"`` string; the class is imported on first
+    ``get_collector`` call and cached in-place.
+
+    ``get_store(name)`` resolves the collector class first, then reads
+    its ``store_cls`` attribute — each collector declares its own store.
     """
 
     def __init__(self) -> None:
-        self._collectors: dict[str, type] = {}
-        self._stores: dict[str, type] = {}
+        self._entries: dict[str, type | str] = {}
 
-    def register_collector(self, name: str, collector_cls: type) -> None:
-        """Register a collector class for the given collection name."""
-        self._collectors[name] = collector_cls
+    def register_entry(self, name: str, collector_path: str) -> None:
+        """Register a lazy entry-point path for a collector.
 
-    def register_store(self, name: str, store_cls: type) -> None:
-        """Register a store class for the given collection name."""
-        self._stores[name] = store_cls
+        Paths use ``"module.path:ClassName"`` format (setuptools entry-point style).
+        """
+        self._entries[name] = collector_path
 
     def get_collector(self, name: str) -> type:
-        """Look up a collector class by collection name.
-
-        Raises:
-            ValueError: If the name is not registered.
-        """
-        if name not in self._collectors:
-            raise ValueError(f"Unknown collector: {name}")
-        return self._collectors[name]
+        """Look up a collector class.  Resolves lazy entries on first call."""
+        entry = self._entries.get(name)
+        if entry is None:
+            raise ValueError(
+                f"Unknown collector: '{name}'. Registered: {sorted(self._entries.keys())}"
+            )
+        if isinstance(entry, type):
+            return entry
+        # Lazy import — "module.path:ClassName"
+        module_path, class_name = entry.rsplit(":", 1)
+        cls = getattr(importlib.import_module(module_path), class_name)
+        self._entries[name] = cls  # cache-in-place: string → class
+        return cls
 
     def get_store(self, name: str) -> type:
-        """Look up a store class by collection name.
+        """Look up the store class for a collector.
 
-        Raises:
-            ValueError: If the name is not registered.
+        Derived from the collector's ``store_cls`` class attribute —
+        each collector declares its own store, so no separate registration
+        is needed.
         """
-        if name not in self._stores:
-            raise ValueError(f"Unknown store: {name}")
-        return self._stores[name]
+        collector_cls = self.get_collector(name)
+        return collector_cls.store_cls
 
 
-# ── Module-level built-in registration ────────────────────────────────
+# ── Module-level built-in registration (lazy) ─────────────────────────
+
 BUILTIN_REGISTRY = Registry()
-BUILTIN_REGISTRY.register_collector("vllm_metrics", VLLMPollingCollector)
-BUILTIN_REGISTRY.register_collector("vllm_zmq", VLLMKVEventCollector)
-BUILTIN_REGISTRY.register_store("vllm_metrics", MetricsStore)
-BUILTIN_REGISTRY.register_store("vllm_zmq", KVCacheStore)
+BUILTIN_REGISTRY.register_entry(
+    "vllm_metrics",
+    "uni_agent.llm_router.collectors.collector.vllm.polling_collector:VLLMPollingCollector",
+)
+BUILTIN_REGISTRY.register_entry(
+    "vllm_zmq",
+    "uni_agent.llm_router.collectors.collector.vllm.event_collector:VLLMKVEventCollector",
+)
