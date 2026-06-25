@@ -27,6 +27,7 @@ ROUTER_CONFIG=${ROUTER_CONFIG:-}
 # ── Tunables (env-overridable) ──
 # Single machine with N GPUs. TP must divide N; dp = N / TP.
 NWORKERS=${NWORKERS:-8}          # agent rollout workers
+CONCURRENCY=${CONCURRENCY:-}     # agent-loop concurrency (global in-flight trajectories); unset = YAML's `concurrency` (16). effective per-worker = CONCURRENCY // NWORKERS. Aim for CONCURRENCY ≈ dp × MAX_NUM_SEQS
 NNODES=${NNODES:-1}              # physical nodes (147 is single-machine → 1, NOT 4)
 NGPUS=${NGPUS:-8}                # GPUs per node
 TP=${TP:-2}                      # tensor parallel; dp = NGPUS*NNODES / TP
@@ -54,12 +55,20 @@ if [ $((TOTAL_GPUS % TP)) -ne 0 ]; then
     echo "ERROR: tensor-parallel-size ($TP) must divide total GPUs ($TOTAL_GPUS)" >&2
     exit 1
 fi
-echo "=== infer_multi: $NNODES node x $NGPUS GPU, tp=$TP → dp=$((TOTAL_GPUS / TP)) replicas, max_num_seqs=$MAX_NUM_SEQS, workers=$NWORKERS, max_samples=$MAX_SAMPLES ==="
+# Propagate agent-loop concurrency to Ray workers (they inherit exported host env
+# at Ray spawn). CONCURRENCY is read by uni_agent/agent_loop.py to size the
+# in-flight trajectory semaphore.
+[ -n "$CONCURRENCY" ] && export CONCURRENCY
+CONC_DISPLAY=${CONCURRENCY:-"<yaml>"}
+echo "=== infer_multi: $NNODES node x $NGPUS GPU, tp=$TP → dp=$((TOTAL_GPUS / TP)) replicas, max_num_seqs=$MAX_NUM_SEQS, workers=$NWORKERS, concurrency=$CONC_DISPLAY, max_samples=$MAX_SAMPLES ==="
 
 ROUTER_ARGS=()
 if [ -n "$ROUTER_CONFIG" ]; then
     ROUTER_ARGS+=(--router-config-path "$ROUTER_CONFIG")
 fi
+
+# Number of rollouts per prompt (n). Env-overridable.
+N=${N:-1}
 
 python ${PROJECT_ROOT}/examples/agent_interaction/parallel_infer.py \
     --data-path $DATA_PATH \
@@ -74,5 +83,5 @@ python ${PROJECT_ROOT}/examples/agent_interaction/parallel_infer.py \
     --prompt-length $PROMPT_LEN \
     --response-length $RESPONSE_LEN \
     --max-samples $MAX_SAMPLES \
-    --n 1 \
+    --n $N \
     "${ROUTER_ARGS[@]}"

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import pickle
 import uuid
 from pathlib import Path
@@ -54,7 +55,15 @@ class UniAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         config_dict = self._init_config(sampling_params, **kwargs)
         self.mask_abnormal_exit_traj = config_dict.get("mask_abnormal_exit_traj", False)
-        global_concurrent = config_dict.get("concurrency", 512)
+        # Agent-loop concurrency (global in-flight trajectories across all workers).
+        # Overridable via the CONCURRENCY env var (set by scripts/infer_multi.sh for
+        # high-throughput runs); falls back to the YAML `concurrency` field when unset,
+        # so existing configs are unaffected. Per-worker in-flight = this // num_workers.
+        concurrency_override = os.environ.get("CONCURRENCY")
+        if concurrency_override:
+            global_concurrent = int(concurrency_override)
+        else:
+            global_concurrent = config_dict.get("concurrency", 512)
         num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
         worker_concurrent = max(global_concurrent // num_workers, 1)
         if UniAgentLoop._semaphore is None:
