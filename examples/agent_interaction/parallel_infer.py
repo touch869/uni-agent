@@ -66,7 +66,13 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = args.tensor_parallel_size
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.91
     config.actor_rollout_ref.rollout.max_num_seqs = args.max_num_seqs
-    config.actor_rollout_ref.rollout.max_model_len = min(args.prompt_length + args.response_length + 1024, 70000)
+    # max_model_len: overridable via MAX_MODEL_LEN env. Default formula caps at
+    # 70000, but for multi-turn agent loops the prompt grows across turns and a
+    # tight wall triggers 1-token degradation; set MAX_MODEL_LEN to the model's
+    # native context (e.g. 40960 for Qwen3-8B) at run time. Must not exceed the
+    # model's max_position_embeddings or vLLM rejects it.
+    _default_mmlen = min(args.prompt_length + args.response_length + 1024, 70000)
+    config.actor_rollout_ref.rollout.max_model_len = int(os.environ.get("MAX_MODEL_LEN", 0)) or _default_mmlen
     config.actor_rollout_ref.rollout.disable_log_stats = False  # expose vllm: metrics on /metrics for the router
 
     # Data configs
