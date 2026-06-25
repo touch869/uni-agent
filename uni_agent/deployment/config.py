@@ -3,6 +3,8 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .mock.config import MockDeploymentConfig
+
 
 class HostDeploymentConfig(BaseModel):
     """Configuration for host-local execution (no container)."""
@@ -187,6 +189,7 @@ DeployConfig: TypeAlias = Annotated[
     | LocalAttachDeploymentConfig
     | HostDeploymentConfig
     | LocalNativeDeploymentConfig
-    | ModalDeploymentConfig,
+    | ModalDeploymentConfig
+    | MockDeploymentConfig,
     Field(discriminator="type"),
 ]

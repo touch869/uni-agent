@@ -6,6 +6,7 @@ from .config import (
     LocalAttachDeploymentConfig,
     LocalDeploymentConfig,
     LocalNativeDeploymentConfig,
+    MockDeploymentConfig,
     ModalDeploymentConfig,
     VefaasDeploymentConfig,
 )
@@ -15,6 +16,7 @@ _LAZY_EXPORTS = {
     "LocalAttachDeployment": ".local_attach.deployment",
     "LocalDeployment": ".local.deployment",
     "LocalNativeDeployment": ".local_native.deployment",
+    "MockDeployment": ".mock.deployment",
     "ModalDeployment": ".modal.deployment",
     "VefaasDeployment": ".vefaas.deployment",
 }
@@ -25,12 +27,14 @@ __all__ = [
     "LocalAttachDeploymentConfig",
     "LocalDeploymentConfig",
     "LocalNativeDeploymentConfig",
+    "MockDeploymentConfig",
     "ModalDeploymentConfig",
     "VefaasDeploymentConfig",
     "HostDeployment",
     "LocalAttachDeployment",
     "LocalDeployment",
     "LocalNativeDeployment",
+    "MockDeployment",
     "ModalDeployment",
     "VefaasDeployment",
 ]
