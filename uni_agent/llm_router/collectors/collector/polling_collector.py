@@ -117,7 +117,11 @@ class PollingCollector(ABC):
     async def _polling_loop(self) -> None:
         """Background loop: poll all endpoints at ``_interval``, parse, write to store."""
         # Create the httpx client here so it binds to THIS loop (background thread).
-        self._client = httpx.AsyncClient(timeout=self._http_timeout)
+        # trust_env=False: ignore HTTP_PROXY/HTTPS_PROXY env — replicas advertise
+        # docker-bridge IPs (172.17.x.x) which a corporate proxy can't reach, so
+        # proxying /metrics polls makes the router blind (→ load tie → imbalance).
+        # Polling is plain HTTP to internal endpoints; no proxy/SSL env needed.
+        self._client = httpx.AsyncClient(timeout=self._http_timeout, trust_env=False)
         logger.debug(f"httpx client created, timeout={self._http_timeout}")
         try:
             while True:
