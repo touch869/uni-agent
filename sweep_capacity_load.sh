@@ -50,6 +50,7 @@ ROUTER_CONFIG="pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
 export ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-1}
 export VLLM_HOST_IP=${VLLM_HOST_IP:-127.0.0.1}   # avoid ephemeral-port exhaustion across replicas
 export MC_TCP_ENABLE_CONNECTION_POOL=${MC_TCP_ENABLE_CONNECTION_POOL:-1}   # mooncake -800 fix: reuse TCP connections (else ephemeral port exhaustion under TP=2 concurrency). See memory mooncake-tp2-conn-pool-fix
+export MOONCAKE_CPU_STAGING=${MOONCAKE_CPU_STAGING:-1}   # mooncake writeBody/tp_rank:1 fix: GPU KV → pinned-CPU staging buffer (worker thread owns CUDA ctx) → mooncake TCP. Needs the patched worker.py (scripts/vllm_patches/mooncake_store_worker.py). Pairs with conn-pool.
 export PYTHONHASHSEED=${PYTHONHASHSEED:-0}        # MUST: consistent block hashes across DP ranks for prefix cache hit
 # mooncake master + config (one master per host, shared by all dp replicas)
 MOONCAKE_MASTER_PORT=${MOONCAKE_MASTER_PORT:-50051}
