@@ -74,7 +74,7 @@ MOONCAKE_NO_AVAILABLE_HANDLE = -200
 #   cross-device-context failure. On the recv side the data lands in the CPU
 #   staging buffer first and is copied back to the GPU address on the worker
 #   thread.
-MOONCAKE_CPU_STAGING = bool(int(os.getenv("MOONCAKE_CPU_STAGING", "0")))
+MOONCAKE_CPU_STAGING = bool(int(os.getenv("MOONCAKE_CPU_STAGING", "1")))
 
 
 class _CpuStagingBuffer:
