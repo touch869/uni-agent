@@ -169,43 +169,34 @@ MAX_SAMPLES=32 N=4 NWORKERS=8 TP=2 MAX_NUM_SEQS=64 \
 
 ## 当前进展(2026-06-26 更新)
 
-### 对照组(sticky default, TP=2, mooncake OFF, 原始代码)— 4/4 完成 ✅
-| 台 | 总耗时 | RM Score | Prefix hit | 备份 | 状态 |
-|---|---|---|---|---|---|
-| 147 | ~790s | 0.0000 | 98.9% | ✅ | 完成 |
-| 145 | ~18min | 0.0000 | 99.5% | ✅ | 完成 |
-| 146 | ~888s | 0.0000 | 99.1% | ✅ | 完成 |
-| 144 | — | 0.0000 | — | ✅ control_144 | 完成 |
+### 三大阻塞全清 ✅(本会话 6 个 commit 到 llm-router-mock)
+1. **负载不均**(waiting_usage 绝对计数 + polling 1s + threshold, `eb097c8`)→ 见 §6c
+2. **mooncake -800**(TCP ephemeral port 耗尽 → `MC_TCP_ENABLE_CONNECTION_POOL=1`, `f19133a`, 150 验证 External hit 99.9%)→ 见 §4
+3. **polling 代理劫持**(httpx `trust_env=False`, `f678f19`; 144/145/146 HTTP_PROXY 劫持 172.17 → router 盲)
 
-**对照基准总耗时 790-1080s(各机不同, 用同机比值屏蔽)。对照不受负载修复影响(走 verl 内置 sticky), 基准有效, 无需重跑。**
+### 对照组(原始)— 4/4 完成, 基准有效
+RM=0.0000, ~790-1080s, prefix 99%。走 verl 内置 sticky, 不经 router, 不受三大修复影响。
 
-### 无 mc 探针(插曲, 已收尾)⚠️ 旧代码(imbalance bug)
-- 145/146/147 曾跑无 mc 探针, 因负载不均(§6)极慢(~4h/台量级)。**已全部 kill + 备份**(`/data1/hgq/traj_backup/probe_oldcode_145`、`probe_oldcode_146`; 147 探针数据被 fixtest 覆盖)
-- 价值: 实证"无 mc + 旧 router = 负载钉死单 replica"(§6), 推动 §6c 修复
+### control2 重跑(同相干净基准)🔄 4 台并行
+- 用户要求 mc 搜索前重跑一份干净对照(ENABLE_MOONCAKE=0, ROUTER_CONFIG=""), 完成自动备份 `traj_backup/control2_<host>`
 
-### 147 负载修复验证 run(新代码, alpha=0.5/threshold=0.7, no-mc)🔄
-- 8/8 GPU 全活、prefix 97.5%、tp 1325→405 tok/s、4 replica 均衡、**0 退化**
-- 进行中(68/128), 等 RM + 总耗时做最终记录
-- 日志: `/data1/hgq/sweep_results/fixtest_a0.5_lt0.7.log`
+### 无 mc KVCAware 搜索(已跑验证 → 已砍)
+- 实证 no-mc 慢 = KVCAware overload-release 移动 session, 无 mc 共享 → 重 prefill(见 §6 分析)。用户决策砍掉, 转 mc 优先
 
-### mooncake transport -800(150 subagent a8e1d66e 后台)🔄
-- 攻 tp_rank:1 writeBody/-800(batch_put 分片 + rank-1 CUDA context)
-- 目标: TRANSFER_FAIL→0、External hit>0。未完成前不碰 4 台
-
-### 144 pilot 结论(已完成, 重要)
-- mooncake lease=60s ✅(LEASE_EXPIRED=0), 但 transport -800 仍在(47658 TRANSFER_FAIL + 172万 writeBody fail, 全 tp_rank:1), External hit ~0.1%, **0 traj 完成/20min**(负载钉死 1 台 + mooncake 开销)。备份 `/data1/hgq/traj_backup/pilot_mc_a0.5_lt0.9`
+### mc KVCAware 主搜索(约束#1 正式搜索)⏭ cron 9e4959d1 自动衔接
+- `ENABLE_MOONCAKE=1`, `LOAD_THRESHOLDS="0.7 0.8 0.9"`(**低 threshold 在前**), round-robin 5/5/4/4, `BACKUP_PREFIX=mc`, 每组备份
+- **关键验证**: External hit **>0**(mooncake 跨 replica KV 生效) + TRANSFER_FAIL **≈0**(conn-pool) + 吞吐接近对照(mooncake 消除重 prefill)
+- lease=60s(sweep) + conn-pool(sweep env) + trust_env(polling) 均已部署 4 台
 
 ### 机器状态
-- 144/145/146: **空闲**(修复代码已 scp 同步, 容器内确认)
-- 147: 验证 run 收尾
-- 150: mooncake subagent
+- 144/145/146/147: control2 跑中 → 完了转 mc 搜索
+- 150: mooncake 验证完成, idle
 
 ## 下一步
-1. 等 150 mooncake subagent 结论(-800 是否解决)
-2. 147 验证完成 → 记录 RM/耗时
-3. **mooncake 解 → 4 台起 18 组 KVCAware+mooncake 主搜索**(`sweep_capacity_load.sh`, alpha×threshold 网格, round-robin HOST_INDEX=0/1/2/3, ENABLE_MOONCAKE=1, 修复后代码, 每组备份轨迹)
-4. mooncake 不可修 → 回报用户定替代(TP=1 / 接受 fallback / 其它)
-5. 汇总分析(见下方指标)
+1. control2 完成 → cron 自动起 mc 搜索
+2. mc 搜索完成(External hit/吞吐达标) → `scripts/analyze_results.sh` 出三路对比表
+3. 汇总分析(对照/control2 vs mc: 吞吐比/RM/Prefix/External/KV, 见下方指标)
+4. 找最优 (alpha, threshold): 吞吐比最高 + External>0 的组合
 
 ## 分析指标(最终产出)
 
