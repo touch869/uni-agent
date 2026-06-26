@@ -130,3 +130,15 @@ log
 outputs
 .history
 planning
+
+# === 本会话工具/临时/legacy (不入仓) ===
+.claude/
+.playwright-mcp/
+session.log.bak
+timeing.txt
+timeing.txt.bak
+workhis/
+# llm_router 旧版备份(避免与 active llm_router 混淆, 仅本地保留)
+uni_agent/llm_router_legacy/
+# planning2 scratch 草稿
+planning2/aaa.md
