@@ -129,7 +129,9 @@ start_mooncake_master() {
 {"metadata_server": "P2PHANDSHAKE", "master_server_address": "127.0.0.1:${MOONCAKE_MASTER_PORT}", "global_segment_size": "${MC_GLOBAL_SEGMENT}", "local_buffer_size": "${MC_LOCAL_BUFFER}", "protocol": "tcp", "device_name": ""}
 EOF
     echo "    🚀 starting mooncake_master --port ${MOONCAKE_MASTER_PORT} (config → ${MOONCAKE_CONFIG_PATH})"
-    nohup mooncake_master --port "${MOONCAKE_MASTER_PORT}" > /tmp/mooncake_master.log 2>&1 &
+    # --default_kv_lease_ttl 60000: mooncake default lease is 5s → LEASE_EXPIRED under
+    # concurrency (A put slow, lease expires before B get). 60s kills LEASE_EXPIRED (150 verified).
+    nohup mooncake_master --port "${MOONCAKE_MASTER_PORT}" --default_kv_lease_ttl "${MOONCAKE_LEASE_TTL:-60000}" > /tmp/mooncake_master.log 2>&1 &
     # wait for master RPC to come up
     for i in $(seq 1 15); do
         if ss -tln 2>/dev/null | grep -q ":${MOONCAKE_MASTER_PORT}"; then
