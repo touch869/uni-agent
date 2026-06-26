@@ -49,6 +49,7 @@ ROUTER_CONFIG="pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
 # ── mooncake (cross-replica KV sharing, on for every group) ──
 export ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-1}
 export VLLM_HOST_IP=${VLLM_HOST_IP:-127.0.0.1}   # avoid ephemeral-port exhaustion across replicas
+export MC_TCP_ENABLE_CONNECTION_POOL=${MC_TCP_ENABLE_CONNECTION_POOL:-1}   # mooncake -800 fix: reuse TCP connections (else ephemeral port exhaustion under TP=2 concurrency). See memory mooncake-tp2-conn-pool-fix
 export PYTHONHASHSEED=${PYTHONHASHSEED:-0}        # MUST: consistent block hashes across DP ranks for prefix cache hit
 # mooncake master + config (one master per host, shared by all dp replicas)
 MOONCAKE_MASTER_PORT=${MOONCAKE_MASTER_PORT:-50051}
@@ -80,6 +81,7 @@ RESPONSE_LEN=${RESPONSE_LEN:-8192}
 MAX_SAMPLES=${MAX_SAMPLES:-64}
 N=${N:-4}                        # 64×4 = 256 rollout = full 256 concurrency
 CONTROL_REPLICAS=${CONTROL_REPLICAS:-1}   # control (default balancer) per host
+BACKUP_PREFIX=${BACKUP_PREFIX:-kvc}        # traj_backup subdir prefix (nomc / mc / kvc)
 
 # ── Config file path ──
 YAML_FILE="${PROJECT_ROOT}/uni_agent/llm_router/configs/strategies/kvc_aware_strategy.yaml"
@@ -167,7 +169,9 @@ run_experiment() {
     local router_cfg=$1   # pkg://... or "" (default)
     local log_file=$2
     check_and_wait_gpu_idle
-    start_mooncake_master
+    # mooncake master only for KVCAware+mc (ENABLE_MOONCAKE=1); no-mc/control skip it
+    if [ "${ENABLE_MOONCAKE}" = "1" ]; then start_mooncake_master; fi
+    rm -rf /data1/hgq/agentic_log_mock/* 2>/dev/null || true   # fresh trajectories per group
     echo "    Running infer_multi.sh → ${log_file}"
     MAX_SAMPLES=${MAX_SAMPLES} \
     N=${N} \
@@ -180,7 +184,7 @@ run_experiment() {
     ROUTER_CONFIG=${router_cfg} \
     bash "${PROJECT_ROOT}/scripts/infer_multi.sh" "$MODEL_PATH" "$DATA_PATH" "$AGENT_CONFIG" \
         > "$log_file" 2>&1 || true
-    stop_mooncake_master
+    if [ "${ENABLE_MOONCAKE}" = "1" ]; then stop_mooncake_master; fi
     echo "    done (exit=$?) → ${log_file}"
 }
 
@@ -235,6 +239,9 @@ for ai in "${!ALPHA_LIST[@]}"; do
             cp "$YAML_BACKUP" "$YAML_FILE"; continue
         fi
         run_experiment "${ROUTER_CONFIG}" "$log_file"
+        mkdir -p /data1/hgq/traj_backup
+        cp -r /data1/hgq/agentic_log_mock "/data1/hgq/traj_backup/${BACKUP_PREFIX}_${tag}" 2>/dev/null || true
+        echo "    trajectories backed up → /data1/hgq/traj_backup/${BACKUP_PREFIX}_${tag}"
         cp "$YAML_BACKUP" "$YAML_FILE"
         echo "    YAML restored"
         echo ""
