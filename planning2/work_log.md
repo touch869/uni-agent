@@ -145,6 +145,7 @@ MAX_SAMPLES=32 N=4 NWORKERS=8 TP=2 MAX_NUM_SEQS=64 \
 1. `load_score.py`: `waiting_usage` 从**比值** `waiting/(waiting+running+1)` 改**绝对** `min(1, waiting/max_num_seqs)`(和 running 一致)→ replica 跑满(kv满+running=max+backlog)时 load 能达 ~0.9 **过阈值** → `is_overloaded()` 触发 → sticky 释放 → rebalance
 2. `collector.py`: `polling_interval` 默认 5→1s + `ROUTER_POLLING_INTERVAL` env 可调(免改代码调频)
 3. `configs/collector.yaml`: `polling_interval: 5→1`(YAML 会覆盖 Python 默认, 必须改 YAML 才生效)
+4. `collectors/collector/polling_collector.py`: httpx `AsyncClient(trust_env=False)`(commit f678f19)——**144/145/146 的 hgq-swe 容器设了 `HTTP_PROXY=http://8.92.10.60:7890` 且 NO_PROXY 不含 172.17, 导致 poll `http://172.17.x/metrics` 被代理劫持(~1100 失败/台)→ router 盲 → 又钉死 1 replica(2/8 GPU)**。trust_env=False 绕过代理直连 172.17, polling 失败 1100→0, 4 台 spread 恢复(OVERLOADED 打火, 2/8→4-8/8)。**147 不受影响**(其 replica 用 host IP 8.92.9.147)。参考 [[kvc-router-proxy]]
 
 **验证(147 hgq-swe-vllm021, alpha=0.5/load_threshold=0.7, no-mc, polling=1):**
 | 指标 | 修复前(钉死1台) | 修复后 |
