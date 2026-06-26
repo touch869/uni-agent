@@ -11,6 +11,10 @@
 #   VLLM_PORT        — port for vLLM server (default: 8000)
 #   ZMQ_SUB_PORT     — ZMQ PUB socket port (default: 5555)
 #   ZMQ_REPLAY_PORT  — ZMQ ROUTER replay port (default: 5556)
+#   VLLM_OFFLOAD_PORT — vLLM port for native KV offload integration (default: 8001)
+#   ZMQ_OFFLOAD_SUB_PORT    — ZMQ PUB socket port for offload integration (default: 5565)
+#   ZMQ_OFFLOAD_REPLAY_PORT — ZMQ replay port for offload integration (default: 5566)
+#   VLLM_CPU_OFFLOAD_GB     — native CPU KV offload buffer GiB (default: 2)
 #
 # Usage:
 #   ./ci_test.sh                                                                 # run all tests
@@ -32,6 +36,10 @@ export VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
 export ZMQ_SUB_PORT="${ZMQ_SUB_PORT:-5555}"
 export ZMQ_REPLAY_PORT="${ZMQ_REPLAY_PORT:-5556}"
+export VLLM_OFFLOAD_PORT="${VLLM_OFFLOAD_PORT:-8001}"
+export ZMQ_OFFLOAD_SUB_PORT="${ZMQ_OFFLOAD_SUB_PORT:-5565}"
+export ZMQ_OFFLOAD_REPLAY_PORT="${ZMQ_OFFLOAD_REPLAY_PORT:-5566}"
+export VLLM_CPU_OFFLOAD_GB="${VLLM_CPU_OFFLOAD_GB:-2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -60,6 +68,8 @@ echo "  Host         : ${VLLM_HOST}"
 echo "  Port         : ${VLLM_PORT}"
 echo "  ZMQ Sub Port : ${ZMQ_SUB_PORT}"
 echo "  ZMQ Replay   : ${ZMQ_REPLAY_PORT}"
+echo "  Offload Port : ${VLLM_OFFLOAD_PORT}"
+echo "  Offload ZMQ  : ${ZMQ_OFFLOAD_SUB_PORT}/${ZMQ_OFFLOAD_REPLAY_PORT}"
 echo ""
 
 # ── Phase 1: Unit tests (no vLLM, no GPU) ────────────────────────────────
@@ -70,6 +80,7 @@ if $RUN_UNIT; then
         "${SCRIPT_DIR}/test_strategies.py" \
         "${SCRIPT_DIR}/test_balancer.py" \
         "${SCRIPT_DIR}/test_balancer_integration_on_cpu.py" \
+        "${SCRIPT_DIR}/collectors/test_kv_event.py" \
         -v
 fi
 
@@ -83,6 +94,12 @@ if $RUN_KV_EVENT; then
     echo "--- Phase 2b: KVEventCollector integration ---"
     VLLM_PORT=${VLLM_PORT} ZMQ_SUB_PORT=${ZMQ_SUB_PORT} ZMQ_REPLAY_PORT=${ZMQ_REPLAY_PORT} \
         python -m pytest "${SCRIPT_DIR}/collectors/test_vllm_kv_event_collector.py" -v
+
+    VLLM_OFFLOAD_PORT=${VLLM_OFFLOAD_PORT} \
+    ZMQ_OFFLOAD_SUB_PORT=${ZMQ_OFFLOAD_SUB_PORT} \
+    ZMQ_OFFLOAD_REPLAY_PORT=${ZMQ_OFFLOAD_REPLAY_PORT} \
+    VLLM_CPU_OFFLOAD_GB=${VLLM_CPU_OFFLOAD_GB} \
+        python -m pytest "${SCRIPT_DIR}/collectors/test_vllm_kv_offload_event_collector.py" -v
 fi
 
 echo "=== All tests done ==="
