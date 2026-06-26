@@ -9,6 +9,19 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _normalize_block_hash(block_hash: Any) -> str:
+    """Normalize vLLM event block hashes across GPU and CPU events.
+
+    vLLM 0.18 GPU KV events apply ``maybe_convert_block_hash`` and, by
+    default, publish the low 64 bits of the internal SHA256 block hash as an
+    int. Native CPU offload events publish the raw internal ``bytes`` hash.
+    Convert raw bytes the same way so both event streams share one key space.
+    """
+    if isinstance(block_hash, (bytes, bytearray)):
+        return str(int.from_bytes(block_hash, byteorder="big") & ((1 << 64) - 1))
+    return str(block_hash)
+
+
 @dataclass(frozen=True)
 class KVCacheEvent:
     """Standardized KV cache event — normalized from backend-specific ZMQ payloads.
@@ -23,6 +36,8 @@ class KVCacheEvent:
                    in BlockStored events).  Each element is one full block
                    encoded as uint32 big-endian (4 bytes per token).
         block_size: Block size (only present in BlockStored events).
+        medium: Cache medium normalized to lowercase (for example ``"gpu"``
+                or ``"cpu"``), when provided by the backend.
     """
 
     event_type: str
@@ -31,6 +46,7 @@ class KVCacheEvent:
     parent_block_hash: str | None
     token_ids: list[bytes] | None
     block_size: int | None
+    medium: str | None = None
 
     # ── Factory ──────────────────────────────────────────────────────────
 
@@ -107,6 +123,8 @@ class KVCacheEvent:
             1: parent_block_hash    — single value or None
             2: token_ids            — list of int or None
             3: block_size           — int
+            4: lora_id              — deprecated, ignored
+            5: medium               — str or None
 
         Raw ``token_ids`` (``list[int]``) are chopped into full blocks
         and encoded as uint32 big-endian bytes via ``_convert_token_ids``.
@@ -114,15 +132,25 @@ class KVCacheEvent:
         if len(fields) < 4:
             raise ValueError(f"BlockStored needs >= 4 fields, got {len(fields)}")
 
-        block_hashes = [str(bh) for bh in fields[0]]
-        parent_block_hash = str(fields[1]) if fields[1] is not None else None
+        block_hashes = [_normalize_block_hash(bh) for bh in fields[0]]
+        parent_block_hash = (
+            _normalize_block_hash(fields[1]) if fields[1] is not None else None
+        )
         raw_token_ids = list(fields[2]) if fields[2] is not None else None
         block_size = int(fields[3])
+        medium = (
+            str(fields[5]).lower()
+            if len(fields) > 5 and fields[5] is not None
+            else None
+        )
 
         # Chop and encode token IDs into block-sized uint32 big-endian bytes
+        # only for regular GPU events. Native CPU-offload events intentionally
+        # carry token_ids=[] and block_size=0 because their block hashes already
+        # identify the offloaded entries.
         token_ids = (
             _convert_token_ids(raw_token_ids, block_size)
-            if raw_token_ids is not None
+            if raw_token_ids and block_size > 0
             else None
         )
 
@@ -132,7 +160,8 @@ class KVCacheEvent:
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
-            block_size=block_size
+            block_size=block_size,
+            medium=medium,
         )
 
     @classmethod
@@ -144,7 +173,12 @@ class KVCacheEvent:
             1: medium       — str or None
             2: group_idx    — int or None
         """
-        block_hashes = [str(bh) for bh in fields[0]]
+        block_hashes = [_normalize_block_hash(bh) for bh in fields[0]]
+        medium = (
+            str(fields[1]).lower()
+            if len(fields) > 1 and fields[1] is not None
+            else None
+        )
 
         return cls(
             event_type="removed",
@@ -152,7 +186,8 @@ class KVCacheEvent:
             block_hashes=block_hashes,
             parent_block_hash=None,
             token_ids=None,
-            block_size=None
+            block_size=None,
+            medium=medium,
         )
 
     @classmethod
@@ -164,7 +199,8 @@ class KVCacheEvent:
             block_hashes=[],
             parent_block_hash=None,
             token_ids=None,
-            block_size=None
+            block_size=None,
+            medium=None,
         )
 
     # ── Tag resolution ───────────────────────────────────────────────────

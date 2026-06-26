@@ -78,11 +78,14 @@ def init_config(args: argparse.Namespace) -> DictConfig:
         # kv-cache config with hybrid KV cache manager for Mamba-Attention hybrid models
         vllm_kwargs = {
             "vllm": {
+                "enable_sleep_mode": False,
                 "kv-events-config": {
                     "enable_kv_cache_events": True,
                     "publisher": "zmq",
                     "topic": "kv-events"
-                }
+                },
+                "kv-offloading-size": 64, # GiB
+                "kv-offloading-backend": "native",
             }
         }
         config.actor_rollout_ref.rollout.engine_kwargs = vllm_kwargs
