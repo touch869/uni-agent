@@ -96,11 +96,12 @@ MAX_SAMPLES=32 N=4 NWORKERS=8 TP=2 MAX_NUM_SEQS=64 \
 - 根因: 146 容器 CUDA compat shim(libcuda.so.575)覆盖宿主(570)→ Error 804
 - 修复: mv /usr/local/cuda/compat /usr/local/cuda/compat.disabled
 
-### 4. mooncake TP=2 transport -800 ✅ 已解决(2026-06-26, conn-pool env)
+### 4. mooncake TP=2 transport -800 ✅ 已解决(2026-06-26, 三件套: staging + conn-pool + lease)
 - **真根因(最终, 三次定位后坐实)**: **TCP ephemeral port 耗尽**。mooncake `TcpTransport` 每条 KV transfer 开新短连接, TP=2×4 worker×高并发 `batch_put` 瞬间打爆宿主 ephemeral port(~28k, 32768-60999)→ `connect: Cannot assign requested address` → `code={-800}`。失败 **tp_rank:0/1 均匀**(非 rank:1), **0 条 writeBody/CUDA**(旧 CUDA 签名已被前次 CPU-staging 补丁消除)。单轮 concurrent20 日志 69844 条 connection 失败
 - **修复(纯 env, 不改源码)**: `export MC_TCP_ENABLE_CONNECTION_POOL=1` → TcpTransport 连接池复用, 不再每条 transfer 新 connect, port 耗尽消失
 - **150 充分验证(lease=60000)**: concurrent20 TRANSFER_FAIL **1561→0**; sustained180(44 轮)**0 fail, 44/44 过**; External prefix hit **10.9%→99.9%**; B 端 20 并发 **71-104s→12-13s**(KV 命中跳过 prefill)
-- **证伪(写进 memory)**: ① batch_put 分片**反更糟**(1561→2199, 更多 submitTransfer=更多短连接=更快 port 耗尽), 已回退; ② VLLM_HOST_IP=127.0.0.1 非必需(conn-pool 一项即 0 fail); ③ CPU staging 与本根因无关
+- **证伪(写进 memory)**: ① batch_put 分片**反更糟**(1561→2199, 更多 submitTransfer=更多短连接=更快 port 耗尽), 已回退; ② VLLM_HOST_IP=127.0.0.1 非必需(conn-pool 一项即 0 fail)
+- **⚠️ 更正(2026-06-26 verl 实测)**: 之前判"CPU staging 与本根因无关"**只对 150 standalone**。**verl 路径(4 replica)staging 必需** —— 145 实测 246,445 条 `writeBody failed`(tp_rank:1 CUDA memcpy)。150 因 worker.py 已含 staging 补丁故 writeBody=0; 4 台 verl 未部署 → writeBody 海量。**部署 staging 补丁(scripts/vllm_patches/mooncake_store_worker.py, commit b3b2df6)+ MOONCAKE_CPU_STAGING=1(sweep, cc4c315)后, writeBody 246k→0、TRANSFER_FAIL=0**。即 mooncake TP=2 需**三件套**: staging(writeBody) + conn-pool(端口耗尽) + lease=60s(LEASE_EXPIRED), 缺一不可
 - **证据**: 150 `/data1/hgq/mooncake_tp2_verify/`(restart_all.sh 第 40 行含修复 env) + memory `[[mooncake-tp2-conn-pool-fix]]`; 150 已清理(GPU/进程全释放, worker.py 未改, 分片补丁已回退)
 
 ### 4-历史. mooncake TP=2 诊断链(早期, 已被上方 conn-pool 结论取代, 保留作 trail)
