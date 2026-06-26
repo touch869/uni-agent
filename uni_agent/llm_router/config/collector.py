@@ -7,15 +7,34 @@ connection type, not per-collector definitions.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from uni_agent.llm_router.config.base import ConfigError, _multiline_repr
 
 
 _DEFAULT_HTTP_POLLING: dict[str, float] = {
-    "polling_interval": 5.0,
+    "polling_interval": 1.0,
     "http_timeout": 10.0,
 }
+
+
+def _http_polling_default() -> dict[str, float]:
+    """Default http_polling, with ``polling_interval`` overridable via env.
+
+    ``ROUTER_POLLING_INTERVAL`` lets a launch tune poll cadence without a code
+    change — faster polling means the router reflects each replica's load
+    sooner, so new sessions spread instead of pinning the first replica.
+    Falls back to ``_DEFAULT_HTTP_POLLING`` when unset / unparseable.
+    """
+    params = dict(_DEFAULT_HTTP_POLLING)
+    env_interval = os.environ.get("ROUTER_POLLING_INTERVAL")
+    if env_interval:
+        try:
+            params["polling_interval"] = float(env_interval)
+        except (TypeError, ValueError):
+            pass
+    return params
 
 _DEFAULT_LONG_CONNECTION: dict[str, float | int] = {
     "base_retry_delay": 1.0,
@@ -80,7 +99,7 @@ class CollectorConfig:
         long_connection: Long-connection tuning parameters dict.
     """
 
-    http_polling: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_HTTP_POLLING))
+    http_polling: dict[str, float] = field(default_factory=_http_polling_default)
     long_connection: dict[str, float | int] = field(default_factory=lambda: dict(_DEFAULT_LONG_CONNECTION))
 
     def __post_init__(self) -> None:

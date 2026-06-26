@@ -8,7 +8,7 @@ score ``α·S_cache + (1-α)·S_load`` keeps "bigger = preferred".
 Available functions (select by name via ``LOAD_FNS`` / ``get_load_fn``):
     - ``"normalized"`` (default): convex combination of three normalized signals
         running_usage = min(1, running / max_num_seqs)
-        waiting_usage = waiting / (waiting + running + 1)
+        waiting_usage = min(1, waiting / max_num_seqs)
         load = a·kv_usage + b·running_usage + c·waiting_usage     (a+b+c=1)
       Default weights (a, b, c) = (0.4, 0.3, 0.3); ``max_num_seqs`` from env
       ``MAX_NUM_SEQS`` (default 64).
@@ -53,9 +53,14 @@ def load_normalized(
         running_usage = min(1.0, float(running) / float(max_num_seqs))
     else:
         running_usage = 1.0
-    # waiting_usage: the backlog's share of total in-flight work. The +1 in the
-    # denominator keeps it < 1 even with zero running and avoids div-by-zero.
-    waiting_usage = float(waiting) / (float(waiting) + float(running) + 1.0)
+    # waiting_usage: fraction of scheduler capacity backlogged, mirroring
+    # running_usage's normalization (clamp to 1.0 — waiting can transiently
+    # exceed max_num_seqs under KV pressure). max_num_seqs=0 → fully occupied,
+    # so we never divide by zero.
+    if max_num_seqs > 0:
+        waiting_usage = min(1.0, float(waiting) / float(max_num_seqs))
+    else:
+        waiting_usage = 1.0
     return a * float(kv_usage) + b * running_usage + c * waiting_usage
 
 
