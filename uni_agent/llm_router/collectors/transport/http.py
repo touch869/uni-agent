@@ -43,9 +43,11 @@ class HTTPTransport(Transport):
         self._interval = interval
         self._http_timeout = http_timeout
         self._client: httpx.AsyncClient | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Start the HTTP polling loop — delivers response text to handler."""
+        self._loop = asyncio.get_running_loop()
         self._client = httpx.AsyncClient(timeout=self._http_timeout)
         try:
             while True:
@@ -61,10 +63,20 @@ class HTTPTransport(Transport):
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:
             pass
-        finally:
-            if self._client is not None:
-                await self._client.aclose()
-                self._client = None
 
     def stop(self) -> None:
-        """Stop HTTP polling — lifecycle managed by Collector, nothing to do here."""
+        """Stop HTTP polling — close the client on the event-loop thread.
+
+        The Collector cancels the subscribe task, which exits the loop.  The
+        AsyncClient must be closed *on the running loop* (httpx/anyio raise
+        ``NoEventLoopError`` if aclose runs after the loop stops), so we
+        schedule the close via ``run_coroutine_threadsafe`` while the loop is
+        still alive.
+        """
+        if self._client is not None and self._loop is not None and self._loop.is_running():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._client.aclose(), self._loop)
+                fut.result(timeout=5)
+            except Exception as exc:
+                logger.debug("Error closing HTTP client: %s", exc)
+            self._client = None

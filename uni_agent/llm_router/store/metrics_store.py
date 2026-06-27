@@ -63,6 +63,12 @@ class MetricsStore:
         with self._lock:
             return dict(self._data.get(node_id, {}))
 
+    # Public aliases — ``get`` / ``get_metric`` / ``get_metrics`` all delegate
+    # to ``_get`` so callers can use whichever naming fits their context.
+    def get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
+        """Read metrics (public alias for ``_get``)."""
+        return self._get(node_id, key)
+
     def refresh(self, new_data: dict[str, dict[str, Any]]) -> None:
         """Batch refresh from collectors.
 
