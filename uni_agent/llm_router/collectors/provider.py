@@ -1,8 +1,8 @@
 """CollectorProvider — lifecycle manager for data collectors.
 
-Creates and manages ``Collector`` instances (Transport + Decoder) from
-``BUILTIN_REGISTRY``.  Stores are singletons managed separately —
-use ``StoreProvider`` to query routing data.
+Creates and manages ``Collector`` instances (Transport + Decoder) via
+``get_collector()``.  Stores are singletons managed separately —
+use ``DataStore`` to query routing data.
 """
 
 from __future__ import annotations
@@ -10,17 +10,15 @@ from __future__ import annotations
 from typing import Any
 
 from uni_agent.llm_router.config.router import CollectorConfig
-from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
+from uni_agent.llm_router.collectors.collector import get_collector
 
 
 class CollectorProvider:
     """Lifecycle manager for data collectors.
 
-    Creates collectors via the registry, combining Transport + Decoder
+    Creates collectors via ``get_collector()``, combining Transport + Decoder
     into ``Collector`` instances.  Call ``start()`` / ``stop()`` to
     control the background collection loops.
-
-    For querying routing data, use ``StoreProvider``.
 
     Args:
         collectors_config: ``CollectorConfig`` — connection tuning parameters.
@@ -44,14 +42,14 @@ class CollectorProvider:
 
         for name in collection_names:
             if name == "vllm_metrics":
-                collector = BUILTIN_REGISTRY.get_collector(
+                collector = get_collector(
                     name,
                     endpoints=server_addresses or {},
                     interval=http_polling["polling_interval"],
                     http_timeout=http_polling["http_timeout"],
                 )
             elif name == "vllm_zmq":
-                collector = BUILTIN_REGISTRY.get_collector(
+                collector = get_collector(
                     name,
                     endpoints=kv_event_endpoints or {},
                     base_retry_delay=long_conn["base_retry_delay"],
@@ -60,7 +58,7 @@ class CollectorProvider:
                     retry_backoff_factor=long_conn["retry_backoff_factor"],
                 )
             else:
-                collector = BUILTIN_REGISTRY.get_collector(name)
+                collector = get_collector(name)
             self._collectors.append(collector)
 
     # ── Lifecycle ───────────────────────────────────────────────────────

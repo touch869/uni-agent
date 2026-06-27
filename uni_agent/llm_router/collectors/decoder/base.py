@@ -21,11 +21,15 @@ class Decoder(ABC):
     store_cls: type  # Store class this decoder writes to
 
     @abstractmethod
-    def decode(self, raw_data: bytes | str, node_id: str) -> None:
-        """Decode raw data and write results to the store.
+    def decode(self, raw_data: bytes | str, node_id: str) -> Any:
+        """Decode raw data and return structured result.
 
         Args:
             raw_data: Raw payload — ``bytes`` (from ZMQ) or ``str``
                 (from HTTP response text).
             node_id: Source endpoint/node identifier.
+
+        Returns:
+            Structured update object (e.g., KVCacheUpdate, MetricsUpdate).
+            Returns None if decode fails.
         """

@@ -1,7 +1,7 @@
 """VLLMMetricsDecoder — vLLM Prometheus metrics decoder.
 
-Parses Prometheus exposition-format text and writes results
-to MetricsStore.
+Parses Prometheus exposition-format text and returns structured metrics.
+Store writes are handled by Collector via DataStore.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.collectors.decoder.vllm.metrics_update import MetricsUpdate
 from uni_agent.llm_router.metric_spec import METRIC_SPECS, MetricKey
 from uni_agent.llm_router.store.metrics_store import MetricsStore
 
@@ -18,8 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 class VLLMMetricsDecoder(Decoder):
-    """vLLM Prometheus metrics decoder — parses HTTP response text
-    and writes results to MetricsStore.
+    """vLLM Prometheus metrics decoder — parses HTTP response text.
+
+    Returns structured metrics. Does NOT write to store — Collector
+    handles writes via DataStore.
 
     vLLM Prometheus raw name → canonical key mapping:
         ``vllm:kv_cache_usage_perc``  → ``KV_CACHE_USAGE_PERC``
@@ -35,20 +38,20 @@ class VLLMMetricsDecoder(Decoder):
         "vllm:num_requests_waiting": MetricKey.NUM_REQUESTS_WAITING,
     }
 
-    def __init__(self) -> None:
-        self._store = self.store_cls.singleton()
-
-    def decode(self, raw_data: bytes | str, node_id: str) -> None:
-        """Parse Prometheus text and write results to store.
+    def decode(self, raw_data: bytes | str, node_id: str) -> MetricsUpdate | None:
+        """Parse Prometheus text and return structured metrics.
 
         Args:
             raw_data: HTTP response text (Prometheus exposition format).
             node_id: Source endpoint identifier.
+
+        Returns:
+            MetricsUpdate with parsed metrics, or None if decode failed.
         """
         # HTTP delivers str; ignore bytes data
         if isinstance(raw_data, bytes):
             logger.debug("VLLMMetricsDecoder received bytes data, expected str — skipping")
-            return
+            return None
 
         result: dict[str, Any] = {}
         for line in raw_data.splitlines():
@@ -64,4 +67,4 @@ class VLLMMetricsDecoder(Decoder):
                 value_type = METRIC_SPECS[canonical].get("value_type", float)
                 result[canonical] = value_type(value)
 
-        self._store.refresh({node_id: result})
+        return MetricsUpdate(node_id=node_id, metrics=result)

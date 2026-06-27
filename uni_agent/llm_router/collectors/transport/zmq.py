@@ -220,7 +220,10 @@ class ZMQTransport(Transport):
         self, node_id: str, handler: Callable[[bytes | str, str], None],
     ) -> None:
         """Request replay of historical data for a single endpoint.
-        Degrade to subscription-only on failure."""
+
+        Sends "replay" request and receives msgpack-encoded response.
+        Degrades to subscription-only on failure.
+        """
         sockets = self._endpoint_sockets.get(node_id)
         if sockets is None or sockets.replay_socket is None:
             return
@@ -235,10 +238,9 @@ class ZMQTransport(Transport):
             except asyncio.TimeoutError:
                 return  # timeout → degrade to subscription-only
 
+            # replay_data is msgpack-encoded, pass directly to handler
             if replay_data:
-                for line in replay_data.splitlines():
-                    if line.strip():
-                        handler(line, node_id)
+                handler(replay_data, node_id)
 
         except zmq.ZMQError as exc:
             logger.warning("ZMQ replay error for node %s: %s", node_id, exc)
