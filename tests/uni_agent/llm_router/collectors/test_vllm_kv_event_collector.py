@@ -18,8 +18,6 @@ from conftest import NODE_ID, ZMQ_SUB_PORT, ZMQ_REPLAY_PORT, VLLM_MODEL, send_in
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 
-pytestmark = [pytest.mark.st, pytest.mark.gpu]
-
 
 def _make_collector():
     return BUILTIN_REGISTRY.get_collector(
@@ -39,7 +37,7 @@ class TestVLLMKVEventCollectorWithRealService:
             replicas_by_block is non-empty.
             NODE_ID appears in at least one block's replica set.
         """
-        store = KVCacheStore.default()
+        store = KVCacheStore.singleton()
         collector = _make_collector()
 
         collector.start()
@@ -62,7 +60,7 @@ class TestVLLMKVEventCollectorWithRealService:
         Expectation:
             block_size is a positive integer (vLLM default is 16).
         """
-        store = KVCacheStore.default()
+        store = KVCacheStore.singleton()
         collector = _make_collector()
 
         collector.start()
@@ -81,7 +79,7 @@ class TestVLLMKVEventCollectorWithRealService:
         Expectation:
             After multiple requests, replicas_by_block has entries.
         """
-        store = KVCacheStore.default()
+        store = KVCacheStore.singleton()
         collector = _make_collector()
 
         collector.start()
@@ -104,7 +102,7 @@ class TestVLLMKVEventCollectorWithRealService:
         Expectation:
             After clear_replica, no block in replicas_by_block contains NODE_ID.
         """
-        store = KVCacheStore.default()
+        store = KVCacheStore.singleton()
         collector = _make_collector()
 
         collector.start()
@@ -133,7 +131,7 @@ class TestVLLMKVEventCollectorWithRealService:
             remote_to_local_block_hash is non-empty.
             All local hashes are present in store.replicas_by_block.
         """
-        store = KVCacheStore.default()
+        store = KVCacheStore.singleton()
         collector = _make_collector()
 
         collector.start()

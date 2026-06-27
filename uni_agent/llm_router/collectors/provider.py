@@ -1,15 +1,8 @@
-"""RouteDataProvider — unified query entry point for routing decisions.
+"""CollectorProvider — lifecycle manager for data collectors.
 
-Strategy layers call ``RouteDataProvider`` methods to get metrics data.
-It delegates to store instances (``MetricsStore`` for polling metrics,
-``KVCacheStore`` for GPU prefix cache data).
-
-Each collector creates its own store instance in ``__init__`` via
-``store_cls()``.  Stores are singletons — calling ``MetricsStore()``
-or ``KVCacheStore()`` always returns the shared instance, so dedup
-happens automatically at the store level, not in the provider.
-
-All query computations are delegated to the respective store classes.
+Creates and manages ``Collector`` instances (Transport + Decoder) from
+``BUILTIN_REGISTRY``.  Stores are singletons managed separately —
+use ``StoreProvider`` to query routing data.
 """
 
 from __future__ import annotations
@@ -17,49 +10,58 @@ from __future__ import annotations
 from typing import Any
 
 from uni_agent.llm_router.config.router import CollectorConfig
-from uni_agent.llm_router.collectors.collector.polling_collector import PollingCollector
-from uni_agent.llm_router.collectors.collector.event_collector import EventCollector
-from uni_agent.llm_router.collectors.store.kv_cache_store import KVCacheStore
-from uni_agent.llm_router.collectors.store.metrics_store import MetricsStore
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 
 
-class RouteDataProvider:
-    """Unified query entry point — strategies use this to access all metrics.
+class CollectorProvider:
+    """Lifecycle manager for data collectors.
 
-    ``RouteDataProvider`` creates collectors.  Store deduplication is
-    handled by the store classes themselves (singleton pattern) — no
-    manual dedup needed here.
+    Creates collectors via the registry, combining Transport + Decoder
+    into ``Collector`` instances.  Call ``start()`` / ``stop()`` to
+    control the background collection loops.
 
-    All query computations are delegated to the respective store classes.
+    For querying routing data, use ``StoreProvider``.
 
     Args:
-        collectors_config: ``CollectorConfig`` — provides common settings
-            and endpoint addresses.
+        collectors_config: ``CollectorConfig`` — connection tuning parameters.
         collection_names: List of collection names to initialize (e.g.
             ``["vllm_metrics", "vllm_zmq"]``).
+        server_addresses: ``{node_id: ip:port}`` for HTTP transport.
+        kv_event_endpoints: ``{node_id: [sub_addr, replay_addr]}`` for ZMQ transport.
     """
 
     def __init__(
         self,
-        collectors_config,
-        collection_names,
+        collectors_config: CollectorConfig,
+        collection_names: list[str],
         server_addresses: dict[str, str] | None = None,
         kv_event_endpoints: dict[str, list[str]] | None = None,
     ) -> None:
         self._collectors: list[Any] = []
+
+        http_polling = collectors_config.http_polling
+        long_conn = collectors_config.long_connection
+
         for name in collection_names:
-            collector_cls = BUILTIN_REGISTRY.get_collector(name)
-            if issubclass(collector_cls, PollingCollector):
-                self._collectors.append(
-                    collector_cls(config=collectors_config, server_addresses=server_addresses)
+            if name == "vllm_metrics":
+                collector = BUILTIN_REGISTRY.get_collector(
+                    name,
+                    endpoints=server_addresses or {},
+                    interval=http_polling["polling_interval"],
+                    http_timeout=http_polling["http_timeout"],
                 )
-            elif issubclass(collector_cls, EventCollector):
-                self._collectors.append(
-                    collector_cls(config=collectors_config, kv_event_addresses=kv_event_endpoints)
+            elif name == "vllm_zmq":
+                collector = BUILTIN_REGISTRY.get_collector(
+                    name,
+                    endpoints=kv_event_endpoints or {},
+                    base_retry_delay=long_conn["base_retry_delay"],
+                    max_retry_delay=long_conn["max_retry_delay"],
+                    max_retry_attempts=long_conn["max_retry_attempts"],
+                    retry_backoff_factor=long_conn["retry_backoff_factor"],
                 )
             else:
-                raise TypeError(f"unsupport collector: {collector_cls}.")
+                collector = BUILTIN_REGISTRY.get_collector(name)
+            self._collectors.append(collector)
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -69,65 +71,7 @@ class RouteDataProvider:
             collector.start()
 
     def stop(self) -> None:
-        """Stop all collectors and await their cleanup."""
+        """Stop all collectors."""
         for collector in self._collectors:
             collector.stop()
 
-    # ── Convenience accessors for commonly-used stores ────────────────
-
-    @property
-    def _metrics_store(self) -> MetricsStore:
-        """Get the shared MetricsStore singleton."""
-        return MetricsStore.default()
-
-    @property
-    def _kv_store(self) -> KVCacheStore:
-        """Get the shared KVCacheStore singleton."""
-        return KVCacheStore.default()
-
-    # ── Generic polling metric queries (canonical key) ──────────────────
-
-    def get_metric(self, node_id: str, key: str) -> Any:
-        """Query a polling metric by canonical key.
-
-        Delegates to ``MetricsStore.get(node_id, key)``.
-
-        Args:
-            node_id: Target node.
-            key: ``MetricKey`` constant, e.g. ``MetricKey.KV_CACHE_USAGE_PERC``.
-
-        Returns:
-            Metric value; falls back to ``METRIC_SPECS`` default if
-            node or metric is absent.
-        """
-        return self._metrics_store.get(node_id, key)
-
-    def get_metrics(self, node_id: str) -> dict[str, Any]:
-        """Get a node's full polling metrics snapshot.
-
-        Args:
-            node_id: Target node.
-
-        Returns:
-            Dict of canonical_key → value; empty dict if node
-            is absent in the store.
-        """
-        return self._metrics_store.get(node_id)
-
-    # ── KVCache prefix hit rate queries ────────────────────────────────
-
-    def get_gpu_prefix_hit_rate(self, prompt_ids: list[int]) -> dict[str, int]:
-        """Match prefix hashes against cached blocks, return per-replica hit percent.
-
-        Delegates to ``KVCacheStore.get_gpu_prefix_hit_rate(prompt_ids)``.
-        """
-        return self._kv_store.get_gpu_prefix_hit_rate(prompt_ids)
-
-    def get_tier_prefix_hit_rate(
-        self, node_id: str, prompt_ids: list[int], tier: str,
-    ) -> float:
-        """Query tier-level prefix cache hit rate (slow-path data).
-
-        Delegates to ``KVCacheStore.get_tier_prefix_hit_rate``.
-        """
-        return self._kv_store.get_tier_prefix_hit_rate(node_id, prompt_ids, tier)

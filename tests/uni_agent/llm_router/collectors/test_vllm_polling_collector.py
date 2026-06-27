@@ -11,14 +11,10 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from conftest import NODE_ID, VLLM_MODEL
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.store.metrics_store import MetricsStore
-
-pytestmark = [pytest.mark.st, pytest.mark.gpu]
 
 
 POLL_INTERVAL = 2.0
@@ -44,7 +40,7 @@ class TestVLLMMetricsCollectorWithRealService:
             MetricsStore contains NODE_ID after one polling cycle.
             kv_cache_usage_perc → float, num_requests_running/waiting → int.
         """
-        store = MetricsStore.default()
+        store = MetricsStore.singleton()
         collector = _make_collector()
 
         collector.start()
@@ -54,9 +50,9 @@ class TestVLLMMetricsCollectorWithRealService:
         assert NODE_ID in store.all_ids(), (
             f"Expected node_id '{NODE_ID}' in store, got {store.all_ids()}"
         )
-        assert isinstance(store.get(NODE_ID, MetricKey.KV_CACHE_USAGE_PERC), float)
-        assert isinstance(store.get(NODE_ID, MetricKey.NUM_REQUESTS_RUNNING), int)
-        assert isinstance(store.get(NODE_ID, MetricKey.NUM_REQUESTS_WAITING), int)
+        assert isinstance(store.get_metric(NODE_ID, MetricKey.KV_CACHE_USAGE_PERC), float)
+        assert isinstance(store.get_metric(NODE_ID, MetricKey.NUM_REQUESTS_RUNNING), int)
+        assert isinstance(store.get_metric(NODE_ID, MetricKey.NUM_REQUESTS_WAITING), int)
 
     def test_metrics_values_are_sane(self, vllm_service):
         """
@@ -66,16 +62,16 @@ class TestVLLMMetricsCollectorWithRealService:
             num_requests_running >= 0
             num_requests_waiting >= 0
         """
-        store = MetricsStore.default()
+        store = MetricsStore.singleton()
         collector = _make_collector()
 
         collector.start()
         time.sleep(POLL_INTERVAL + 3.0)
         collector.stop()
 
-        assert store.get(NODE_ID, MetricKey.KV_CACHE_USAGE_PERC) >= 0.0
-        assert store.get(NODE_ID, MetricKey.NUM_REQUESTS_RUNNING) >= 0
-        assert store.get(NODE_ID, MetricKey.NUM_REQUESTS_WAITING) >= 0
+        assert store.get_metric(NODE_ID, MetricKey.KV_CACHE_USAGE_PERC) >= 0.0
+        assert store.get_metric(NODE_ID, MetricKey.NUM_REQUESTS_RUNNING) >= 0
+        assert store.get_metric(NODE_ID, MetricKey.NUM_REQUESTS_WAITING) >= 0
 
     def test_store_get_node_dict(self, vllm_service):
         """
@@ -83,14 +79,14 @@ class TestVLLMMetricsCollectorWithRealService:
         Expectation:
             Dict contains kv_cache_usage_perc, num_requests_running, num_requests_waiting.
         """
-        store = MetricsStore.default()
+        store = MetricsStore.singleton()
         collector = _make_collector()
 
         collector.start()
         time.sleep(POLL_INTERVAL + 3.0)
         collector.stop()
 
-        node_metrics = store.get(NODE_ID)
+        node_metrics = store.get_metrics(NODE_ID)
         assert isinstance(node_metrics, dict)
         assert MetricKey.KV_CACHE_USAGE_PERC in node_metrics
         assert MetricKey.NUM_REQUESTS_RUNNING in node_metrics
@@ -102,11 +98,11 @@ class TestVLLMMetricsCollectorWithRealService:
         Expectation:
             After 3 polling cycles the store contains data and values are reasonable.
         """
-        store = MetricsStore.default()
+        store = MetricsStore.singleton()
         collector = _make_collector()
 
         collector.start()
         time.sleep(POLL_INTERVAL * 3 + 2.0)
         collector.stop()
 
-        assert len(store.get(NODE_ID)) > 0, "Store should have metrics after multiple poll cycles"
+        assert len(store.get_metrics(NODE_ID)) > 0, "Store should have metrics after multiple poll cycles"

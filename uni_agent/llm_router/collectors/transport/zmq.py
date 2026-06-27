@@ -1,6 +1,6 @@
 """ZMQTransport — ZMQ replay + sub dual socket transport.
 
-Connects to per-replica ZMQ endpoints (sub + replay), subscribes to
+Connects to per-endpoint ZMQ addresses (sub + replay), subscribes to
 live events, and delivers raw payloads to the handler callback.
 """
 
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class _ReplicaSocketSet:
-    """Per-replica ZMQ socket bundle (internal — not exported)."""
+class _EndpointSocketSet:
+    """Per-endpoint ZMQ socket bundle (internal — not exported)."""
 
     node_id: str
     context: zmq.asyncio.Context
@@ -31,18 +31,18 @@ class _ReplicaSocketSet:
 
 
 class ZMQTransport(Transport):
-    """ZMQ transport — replay + sub dual socket per replica.
+    """ZMQ transport — replay + sub dual socket per endpoint.
 
-    Each replica endpoint gets its own ZMQ context, socket pair, and
-    background coroutine — all replicas subscribe concurrently.
+    Each endpoint gets its own ZMQ context, socket pair, and
+    background coroutine — all endpoints subscribe concurrently.
 
     Args:
-        endpoints: ``{replica_id: [sub_ip:port, replay_ip:port]}``
-            — per-replica ZMQ endpoint addresses.
+        endpoints: ``{node_id: [sub_ip:port, replay_ip:port]}``
+            — per-endpoint ZMQ addresses.
         topic: ZMQ subscription topic filter (default ``"kv-events"``).
         base_retry_delay: Initial retry delay in seconds.
         max_retry_delay: Maximum retry delay cap in seconds.
-        max_retry_attempts: Maximum number of retries per replica.
+        max_retry_attempts: Maximum number of retries per endpoint.
         retry_backoff_factor: Exponential backoff multiplier.
     """
 
@@ -63,25 +63,25 @@ class ZMQTransport(Transport):
 
         self._sub_endpoints: dict[str, str] = {}
         self._replay_endpoints: dict[str, str] = {}
-        for replica_id, addrs in endpoints.items():
-            self._sub_endpoints[replica_id] = f"tcp://{addrs[0]}"
-            self._replay_endpoints[replica_id] = f"tcp://{addrs[1]}"
+        for node_id, addrs in endpoints.items():
+            self._sub_endpoints[node_id] = f"tcp://{addrs[0]}"
+            self._replay_endpoints[node_id] = f"tcp://{addrs[1]}"
 
         self._stopped = False
-        self._replica_sockets: dict[str, _ReplicaSocketSet] = {}
+        self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
         self._retry_counts: dict[str, int] = {}
         self._sub_tasks: dict[str, asyncio.Task] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
-        """Spawn per-replica subscription tasks, deliver payloads to handler."""
+        """Spawn per-endpoint subscription tasks, deliver payloads to handler."""
         self._loop = asyncio.get_running_loop()
         sub_tasks = []
         for node_id in self._sub_endpoints:
             sub_addr = self._sub_endpoints[node_id]
             replay_addr = self._replay_endpoints[node_id]
             t = asyncio.create_task(
-                self._subscribe_for_replica(node_id, sub_addr, replay_addr, handler)
+                self._subscribe_for_endpoint(node_id, sub_addr, replay_addr, handler)
             )
             self._sub_tasks[node_id] = t
             sub_tasks.append(t)
@@ -122,7 +122,7 @@ class ZMQTransport(Transport):
     async def _connect_zmq_for(
         self, node_id: str, sub_addr: str, replay_addr: str,
     ) -> bool:
-        """Create ZMQ context and replay + sub dual socket for a single replica."""
+        """Create ZMQ context and replay + sub dual socket for a single endpoint."""
         try:
             ctx = zmq.asyncio.Context()
 
@@ -133,7 +133,7 @@ class ZMQTransport(Transport):
             replay_socket = ctx.socket(zmq.REQ)
             replay_socket.connect(replay_addr)
 
-            self._replica_sockets[node_id] = _ReplicaSocketSet(
+            self._endpoint_sockets[node_id] = _EndpointSocketSet(
                 node_id=node_id,
                 context=ctx,
                 sub_socket=sub_socket,
@@ -148,8 +148,8 @@ class ZMQTransport(Transport):
             return False
 
     def _close_zmq_sockets_for(self, node_id: str) -> None:
-        """Safely close ZMQ sockets and context for a single replica."""
-        sockets = self._replica_sockets.pop(node_id, None)
+        """Safely close ZMQ sockets and context for a single endpoint."""
+        sockets = self._endpoint_sockets.pop(node_id, None)
         if sockets is None:
             return
         sockets.sub_socket.close()
@@ -157,14 +157,14 @@ class ZMQTransport(Transport):
         sockets.context.term()
 
     def _close_all_zmq_sockets(self) -> None:
-        """Close all per-replica ZMQ sockets and contexts."""
-        for node_id in list(self._replica_sockets.keys()):
+        """Close all per-endpoint ZMQ sockets and contexts."""
+        for node_id in list(self._endpoint_sockets.keys()):
             self._close_zmq_sockets_for(node_id)
 
     async def _reconnect_with_backoff_for(
         self, node_id: str, sub_addr: str, replay_addr: str,
     ) -> bool:
-        """Exponential backoff reconnect for a single replica."""
+        """Exponential backoff reconnect for a single endpoint."""
         retry_count = self._retry_counts.get(node_id, 0)
         while retry_count < self._max_retry_attempts:
             delay = min(
@@ -180,13 +180,13 @@ class ZMQTransport(Transport):
 
         return False
 
-    # ── Per-replica subscription ────────────────────────────────────────
+    # ── Per-endpoint subscription ────────────────────────────────────────
 
-    async def _subscribe_for_replica(
+    async def _subscribe_for_endpoint(
         self, node_id: str, sub_addr: str, replay_addr: str,
         handler: Callable[[bytes | str, str], None],
     ) -> None:
-        """Per-replica subscription: connect → replay → subscribe loop."""
+        """Per-endpoint subscription: connect → replay → subscribe loop."""
         try:
             if not await self._connect_zmq_for(node_id, sub_addr, replay_addr):
                 if not await self._reconnect_with_backoff_for(node_id, sub_addr, replay_addr):
@@ -194,7 +194,7 @@ class ZMQTransport(Transport):
 
             await self._replay_historical_data_for(node_id, handler)
 
-            sockets = self._replica_sockets.get(node_id)
+            sockets = self._endpoint_sockets.get(node_id)
             if sockets is None:
                 return
 
@@ -219,9 +219,9 @@ class ZMQTransport(Transport):
     async def _replay_historical_data_for(
         self, node_id: str, handler: Callable[[bytes | str, str], None],
     ) -> None:
-        """Request replay of historical data for a single replica.
+        """Request replay of historical data for a single endpoint.
         Degrade to subscription-only on failure."""
-        sockets = self._replica_sockets.get(node_id)
+        sockets = self._endpoint_sockets.get(node_id)
         if sockets is None or sockets.replay_socket is None:
             return
 

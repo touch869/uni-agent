@@ -27,5 +27,5 @@ class Decoder(ABC):
         Args:
             raw_data: Raw payload — ``bytes`` (from ZMQ) or ``str``
                 (from HTTP response text).
-            node_id: Source replica/node identifier.
+            node_id: Source endpoint/node identifier.
         """

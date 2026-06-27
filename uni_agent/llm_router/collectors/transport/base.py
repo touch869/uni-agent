@@ -31,7 +31,7 @@ class Transport(ABC):
         Args:
             handler: Callback that receives (raw_data, node_id).
                 raw_data is ``bytes`` (ZMQ) or ``str`` (HTTP response text).
-                node_id identifies the source replica/node.
+                node_id identifies the source endpoint/node.
         """
 
     @abstractmethod

@@ -6,7 +6,7 @@ import threading
 
 from collections.abc import Iterable
 
-from uni_agent.llm_router.hash import get_prefix_hashes
+from uni_agent.llm_router.utils.hash import get_prefix_hashes
 
 
 class KVCacheStore:
@@ -17,7 +17,7 @@ class KVCacheStore:
     the event-loop thread) and read by the balancer (on a Ray actor
     thread) concurrently.
 
-    Singleton — use ``KVCacheStore.default()`` to get the shared instance.
+    Singleton — use ``KVCacheStore.singleton()`` to get the shared instance.
     ``store_cls()`` (called by collectors) also returns the singleton via
     the class-level ``__call__`` override.
 
@@ -27,7 +27,7 @@ class KVCacheStore:
             cache it.  Aligns with aibrix prefixMap (hash → pods).
     """
 
-    _default: KVCacheStore | None = None
+    _instance: KVCacheStore | None = None
 
     def __init__(self) -> None:
         self.block_size: int | None = None
@@ -35,11 +35,11 @@ class KVCacheStore:
         self._lock: threading.Lock = threading.Lock()
 
     @classmethod
-    def default(cls) -> KVCacheStore:
+    def singleton(cls) -> KVCacheStore:
         """Return the shared singleton instance."""
-        if cls._default is None:
-            cls._default = cls()
-        return cls._default
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
     # ── Replica management ──────────────────────────────────────────────
 

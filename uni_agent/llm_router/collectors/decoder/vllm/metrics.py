@@ -36,14 +36,14 @@ class VLLMMetricsDecoder(Decoder):
     }
 
     def __init__(self) -> None:
-        self._store = self.store_cls.default()
+        self._store = self.store_cls.singleton()
 
     def decode(self, raw_data: bytes | str, node_id: str) -> None:
         """Parse Prometheus text and write results to store.
 
         Args:
             raw_data: HTTP response text (Prometheus exposition format).
-            node_id: Source replica identifier.
+            node_id: Source endpoint identifier.
         """
         # HTTP delivers str; ignore bytes data
         if isinstance(raw_data, bytes):

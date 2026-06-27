@@ -1,6 +1,6 @@
 """HTTPTransport — Prometheus HTTP polling transport.
 
-Polls ``http://{address}/metrics`` for each replica at a fixed interval
+Polls ``http://{address}/metrics`` for each endpoint at a fixed interval
 and delivers response text to the handler callback.
 """
 
@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 class HTTPTransport(Transport):
-    """HTTP polling transport — fetches Prometheus metrics from replicas.
+    """HTTP polling transport — fetches Prometheus metrics from endpoints.
 
-    Each replica endpoint is polled at ``interval`` via ``httpx.AsyncClient``.
+    Each endpoint is polled at ``interval`` via ``httpx.AsyncClient``.
     Response text is delivered to the handler callback for decoding.
 
     Args:
-        endpoints: ``{replica_id: ip:port}`` — each address polls
+        endpoints: ``{node_id: ip:port}`` — each address polls
             ``http://{address}/metrics``.
         interval: Polling interval in seconds.
         http_timeout: HTTP request timeout in seconds.
@@ -43,15 +43,10 @@ class HTTPTransport(Transport):
         self._interval = interval
         self._http_timeout = http_timeout
         self._client: httpx.AsyncClient | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Start the HTTP polling loop — delivers response text to handler."""
-        self._loop = asyncio.get_running_loop()
-        # trust_env=False: bypass HTTP(S)_PROXY env vars so polling requests to
-        # replica /metrics endpoints (e.g. 172.17.x or 127.0.0.1) are not hijacked
-        # by a container's outbound proxy — that would blind the router.
-        self._client = httpx.AsyncClient(timeout=self._http_timeout, trust_env=False)
+        self._client = httpx.AsyncClient(timeout=self._http_timeout)
         try:
             while True:
                 coros = {nid: self._client.get(url) for nid, url in self._endpoints.items()}
@@ -66,20 +61,10 @@ class HTTPTransport(Transport):
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:
             pass
+        finally:
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
 
     def stop(self) -> None:
-        """Stop HTTP polling — close the client on the event-loop thread.
-
-        The Collector cancels the subscribe task, which exits the loop.  The
-        AsyncClient must be closed *on the running loop* (httpx/anyio raise
-        ``NoEventLoopError`` if aclose runs after the loop stops), so we
-        schedule the close via ``run_coroutine_threadsafe`` while the loop is
-        still alive.
-        """
-        if self._client is not None and self._loop is not None and self._loop.is_running():
-            try:
-                fut = asyncio.run_coroutine_threadsafe(self._client.aclose(), self._loop)
-                fut.result(timeout=5)
-            except Exception as exc:
-                logger.debug("Error closing HTTP client: %s", exc)
-            self._client = None
+        """Stop HTTP polling — lifecycle managed by Collector, nothing to do here."""
