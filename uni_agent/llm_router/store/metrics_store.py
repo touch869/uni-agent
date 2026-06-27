@@ -6,7 +6,7 @@ import threading
 
 from typing import Any
 
-from uni_agent.llm_router.collectors.metric_spec import METRIC_SPECS
+from uni_agent.llm_router.metric_spec import METRIC_SPECS
 
 
 class MetricsStore:
@@ -17,7 +17,7 @@ class MetricsStore:
     event-loop thread) and read by the balancer (on a Ray actor thread)
     concurrently.
 
-    Singleton — use ``MetricsStore.default()`` to get the shared instance.
+    Singleton — use ``MetricsStore.singleton()`` to get the shared instance.
     ``store_cls()`` (called by collectors) also returns the singleton via
     the class-level ``__call__`` override.
 
@@ -28,18 +28,18 @@ class MetricsStore:
                                existing nodes NOT in ``new_data`` are left untouched
     """
 
-    _default: MetricsStore | None = None
+    _instance: MetricsStore | None = None
 
     def __init__(self) -> None:
         self._data: dict[str, dict[str, Any]] = {}
         self._lock: threading.Lock = threading.Lock()
 
     @classmethod
-    def default(cls) -> MetricsStore:
+    def singleton(cls) -> MetricsStore:
         """Return the shared singleton instance."""
-        if cls._default is None:
-            cls._default = cls()
-        return cls._default
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
     def get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
         """Read metrics.
