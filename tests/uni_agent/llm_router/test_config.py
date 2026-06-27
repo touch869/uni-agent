@@ -1108,7 +1108,7 @@ class TestKVCAwareOther:
         assert isinstance(strategy, KVCAwareStrategyConfig)
         assert strategy.weight == 1.0
         assert strategy.alpha == 0.7
-        assert strategy.load_threshold == 0.1
+        assert strategy.load_threshold == 0.9
         assert strategy.layer_weights == {"cpu": 1.0, "ssd": 0.25}
         assert strategy.collector_names == ["vllm_zmq", "vllm_metrics"]
         assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
