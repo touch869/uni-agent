@@ -21,6 +21,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Ray's default idle-worker reaper (~10 s) kills agent workers between
+# dispatch gaps, ending the job prematurely.  Use a very large threshold
+# so long-running agent loops are not interrupted.
+_RAY_IDLE_WORKER_TIMEOUT_MS = int(os.getenv("RAY_IDLE_WORKER_TIMEOUT_MS", str(2**30 - 1)))
+
 
 def init_config(args: argparse.Namespace) -> DictConfig:
     """Initialize the configuration from hydra and override with command-line arguments."""
@@ -36,6 +41,13 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.agent.num_workers = args.num_workers
     config.actor_rollout_ref.rollout.multi_turn.max_assistant_turns = args.max_turns
     config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
+
+    # Router config (optional): enable an external router via plugin_extension.
+    # When set, VeRL loads the YAML (router_class) and instantiates the router
+    # as the rollout load balancer.  Unset = VeRL built-in router.
+    if args.router_config_path:
+        config.actor_rollout_ref.rollout.router.router_strategy = "plugin_extension"
+        config.actor_rollout_ref.rollout.router.router_config_path = args.router_config_path
 
     # Validation / sampling kwargs
     config.actor_rollout_ref.rollout.temperature = args.temperature
@@ -59,19 +71,27 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.n = args.n
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = args.tensor_parallel_size
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
+    config.actor_rollout_ref.rollout.max_num_seqs = args.max_num_seqs
+    if args.max_model_len is not None:
+        config.actor_rollout_ref.rollout.max_model_len = args.max_model_len
+    config.actor_rollout_ref.rollout.disable_log_stats = False  # expose engine metrics on /metrics endpoint
 
     # Data configs
     config.data.return_raw_chat = True
     config.data.max_prompt_length = args.prompt_length
     config.data.max_response_length = args.response_length
 
+    if args.engine_kwargs is not None:
+        config.actor_rollout_ref.rollout.engine_kwargs = args.engine_kwargs
+
     return config
 
 
 def run_inference(args: argparse.Namespace):
     """Run the inference pipeline using the provided arguments."""
-    # 1. Init Ray
-    ray.init()
+    # 1. Init Ray — disable idle-worker reaper so agent workers survive
+    # dispatch gaps (default ~10 s threshold would kill them prematurely).
+    ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
 
     # 2. Init rollout manager
     logger.info("Initializing configuration and AgentLoopManager...")
@@ -165,6 +185,17 @@ def main():
         type=str,
         default=None,
         help="Optional path to write a JSON result file (mean reward and per-rollout scores).",
+    ),
+    parser.add_argument(
+        "--router-config-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional router config YAML (e.g. pkg://...). When set, enables "
+            "plugin_extension router strategy; the YAML's router_class is "
+            "instantiated as the rollout load balancer. Default None = VeRL "
+            "built-in router."
+        ),
     )
 
     # Inference parameters
@@ -194,6 +225,27 @@ def main():
     parser.add_argument("--n-gpus-per-node", type=int, default=8, help="Number of GPUs per node.")
     parser.add_argument(
         "--tensor-parallel-size", "--tp", type=int, default=4, help="Tensor parallel size for the model."
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Maximum model context length (tokens). If unset the engine default is used.",
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=256,
+        help="Maximum number of concurrent sequences per engine.",
+    )
+    parser.add_argument(
+        "--engine-kwargs",
+        type=json.loads,
+        default=None,
+        help=(
+            "Additional engine keyword arguments as a JSON string. "
+            'Example: \'{"vllm":{"kv-events-config":{"enable_kv_cache_events":true}}}\''
+        ),
     )
 
     args = parser.parse_args()
