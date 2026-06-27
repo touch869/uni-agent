@@ -6,7 +6,7 @@ import threading
 
 from typing import Any
 
-from uni_agent.llm_router.collectors.metric_spec import METRIC_SPECS
+from uni_agent.llm_router.metric_spec import METRIC_SPECS
 
 
 class MetricsStore:
@@ -41,7 +41,7 @@ class MetricsStore:
             cls._default = cls()
         return cls._default
 
-    def get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
+    def _get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
         """Read metrics.
 
         ``get(node_id, key)``  → single value, falls back to spec default.
@@ -81,3 +81,30 @@ class MetricsStore:
         """Return all node IDs currently in the store."""
         with self._lock:
             return list(self._data.keys())
+        
+    def get_metric(self, node_id: str, key: str) -> Any:
+        """Query a polling metric by canonical key.
+
+        Delegates to ``MetricsStore.get(node_id, key)``.
+
+        Args:
+            node_id: Target node.
+            key: ``MetricKey`` constant, e.g. ``MetricKey.KV_CACHE_USAGE_PERC``.
+
+        Returns:
+            Metric value; falls back to ``METRIC_SPECS`` default if
+            node or metric is absent.
+        """
+        return self._get(node_id, key)
+
+    def get_metrics(self, node_id: str) -> dict[str, Any]:
+        """Get a node's full polling metrics snapshot.
+
+        Args:
+            node_id: Target node.
+
+        Returns:
+            Dict of canonical_key → value; empty dict if node
+            is absent in the store.
+        """
+        return self._get(node_id)

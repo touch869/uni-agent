@@ -1,5 +1,7 @@
-"""
-VLLMKVEventCollector — vLLM KV-cache event collector.
+"""VLLMKVDecoder — vLLM KV-cache event decoder.
+
+Decodes msgpack payloads from ZMQ, applies KV cache events to
+KVCacheStore via dispatch table.
 """
 
 from __future__ import annotations
@@ -8,29 +10,23 @@ import logging
 
 import msgpack
 
-from uni_agent.llm_router.config.router import CollectorConfig
-from uni_agent.llm_router.collectors.hash import compute_hash
-from uni_agent.llm_router.collectors.collector.vllm.kv_event import KVCacheEvent
-from uni_agent.llm_router.collectors.collector.zmq_event_collector import ZMQEventCollector
-from uni_agent.llm_router.collectors.store.kv_cache_store import KVCacheStore
+from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.collectors.decoder.vllm.kv_event import KVCacheEvent
+from uni_agent.llm_router.hash import compute_hash
+from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMKVEventCollector(ZMQEventCollector):
-    """vLLM KV-cache event collector — parses msgpack payloads,
-    applies events to KVCacheStore.
-
-    The store is created from store_cls.default() in __init__ and
-    shared across all collectors of the same type (singleton).
-    The collector writes to it via CRUD methods; it never queries the store.
+class VLLMKVDecoder(Decoder):
+    """vLLM KV-cache decoder — msgpack payload → KVCacheStore updates.
 
     Event dispatch uses a ``_DISPATCH`` table mapping ``event_type``
     to handler methods — no if/else chain needed.
 
     Attributes:
         remote_to_local_block_hash: Mapping from vLLM remote block_hash
-            to locally-computed prefix hash (str).  This is used in
+            to locally-computed prefix hash (str).  Used in
             _handle_stored for chained hash computation.
     """
 
@@ -43,27 +39,31 @@ class VLLMKVEventCollector(ZMQEventCollector):
         "clear": "_handle_clear",
     }
 
-    def __init__(self, config, kv_event_addresses: dict[str, list[str]] | None = None) -> None:
-        super().__init__(config, kv_event_addresses=kv_event_addresses)
+    def __init__(self) -> None:
         self._store = self.store_cls.default()
         self.remote_to_local_block_hash: dict[str, str] = {}
 
-    def _consume_payload(self, payload: bytes, node_id: str) -> None:
+    def decode(self, raw_data: bytes | str, node_id: str) -> None:
         """Decode msgpack payload, apply events to store.
 
         Args:
-            payload: Raw ZMQ message bytes.
-            node_id: The replica that sent this payload — used as
-                     default_replica_id for KVCacheEvent.from_raw.
+            raw_data: ZMQ payload bytes (msgpack-encoded).
+            node_id: The replica that sent this payload.
         """
+        # ZMQ delivers bytes; ignore string data (shouldn't happen for this decoder)
+        if isinstance(raw_data, str):
+            logger.debug("VLLMKVDecoder received string data, expected bytes — skipping")
+            return
+
         try:
-            raw_data = msgpack.unpackb(payload, raw=False)
-            events = KVCacheEvent.from_raw(raw_data, default_replica_id=node_id)
+            raw = msgpack.unpackb(raw_data, raw=False)
+            events = KVCacheEvent.from_raw(raw, default_replica_id=node_id)
             for event in events:
                 self._apply_event(event, default_replica_id=node_id)
         except (msgpack.UnpackException, ValueError, TypeError) as exc:
             logger.warning(
-                f"Failed to decode msgpack payload from node {node_id}: {exc}"
+                "Failed to decode msgpack payload from node %s: %s",
+                node_id, exc,
             )
 
     def _apply_event(
@@ -71,13 +71,14 @@ class VLLMKVEventCollector(ZMQEventCollector):
         event: KVCacheEvent,
         default_replica_id: str | None = None,
     ) -> None:
-        """Dispatch a KVCacheEvent to the appropriate handler via _DISPATCH table."""
+        """Dispatch a KVCacheEvent to the appropriate handler."""
         handler_name = self._DISPATCH.get(event.event_type)
         if handler_name is None:
             logger.debug("Unhandled event type: %s", event.event_type)
             return
         handler = getattr(self, handler_name)
-        handler(event, default_replica_id)
+        replica_id = event.replica_id or default_replica_id or ""
+        handler(event, replica_id)
 
     # ── Event handlers ──────────────────────────────────────────────────
 
@@ -90,7 +91,6 @@ class VLLMKVEventCollector(ZMQEventCollector):
             store.block_size = event.block_size
 
         if event.token_ids is not None:
-            # Determine local_parent_hash for chained computation
             local_parent_hash = seed
             if event.parent_block_hash is not None:
                 local_parent_str = self.remote_to_local_block_hash.get(

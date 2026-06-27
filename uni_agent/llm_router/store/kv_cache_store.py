@@ -6,7 +6,7 @@ import threading
 
 from collections.abc import Iterable
 
-from uni_agent.llm_router.collectors.hash import get_prefix_hashes
+from uni_agent.llm_router.hash import get_prefix_hashes
 
 
 class KVCacheStore:
