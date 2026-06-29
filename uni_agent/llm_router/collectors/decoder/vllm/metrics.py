@@ -13,7 +13,6 @@ from typing import Any
 from uni_agent.llm_router.collectors.decoder.base import Decoder
 from uni_agent.llm_router.collectors.decoder.vllm.metrics_update import MetricsUpdate
 from uni_agent.llm_router.metric_spec import METRIC_SPECS, MetricKey
-from uni_agent.llm_router.store.metrics_store import MetricsStore
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +28,6 @@ class VLLMMetricsDecoder(Decoder):
         ``vllm:num_requests_running`` → ``NUM_REQUESTS_RUNNING``
         ``vllm:num_requests_waiting`` → ``NUM_REQUESTS_WAITING``
     """
-
-    store_cls = MetricsStore
 
     _PROMETHEUS_MAP: dict[str, str] = {
         "vllm:kv_cache_usage_perc":  MetricKey.KV_CACHE_USAGE_PERC,

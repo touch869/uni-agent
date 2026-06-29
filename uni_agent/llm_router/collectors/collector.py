@@ -44,13 +44,6 @@ class Collector:
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
 
-    # ── Derived attributes ─────────────────────────────────────────────
-
-    @property
-    def store_cls(self) -> type:
-        """Store class — derived from the Decoder."""
-        return self._decoder.store_cls
-
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -102,28 +95,44 @@ class Collector:
         self._data_store.refresh_metrics({update.node_id: update.metrics})
 
     def stop(self) -> None:
-        """Stop the collector — stop transport, then stop event-loop thread.
+        """Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
+
+        Cancels all asyncio tasks on the loop and waits for their finally blocks
+        to complete *before* stopping the loop.  This prevents two failure modes:
+        1. "Task was destroyed but pending" — task GC'd before finally runs.
+        2. GeneratorExit / sniffio errors — finally block runs outside async context.
 
         Synchronous — blocks until all cleanup is complete.
         """
-        # First stop the transport (it cancels its own tasks and closes sockets)
+        # Signal transport to stop (ZMQ cancels its tasks; HTTP is a no-op)
         self._transport.stop()
 
-        # Cancel and await the main subscribe future
-        if self._future is not None:
-            self._future.cancel()
-            try:
-                self._future.result()
-            except (asyncio.CancelledError, Exception) as exc:
-                logger.debug("Error waiting for collector task to finish: %s", exc)
-            self._future = None
-
-        # Stop the event loop and join the thread
         if self._loop.is_running():
+            # Cancel all tasks and wait for their finally blocks inside the loop
+            # so that aclose() runs while the loop is still alive.
+            async def _cancel_and_drain() -> None:
+                current = asyncio.current_task()
+                tasks = [
+                    t for t in asyncio.all_tasks()
+                    if not t.done() and t is not current
+                ]
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            drain = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
+            try:
+                drain.result(timeout=15)
+            except Exception as exc:
+                logger.debug("Error draining tasks on stop: %s", exc)
+
             self._loop.call_soon_threadsafe(self._loop.stop)
+
         if self._loop_thread is not None:
             self._loop_thread.join(timeout=10)
             self._loop_thread = None
+
+        self._future = None
 
 
 # ── Factory function ───────────────────────────────────────────────────

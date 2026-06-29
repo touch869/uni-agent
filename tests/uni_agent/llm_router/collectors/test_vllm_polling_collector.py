@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 
-from conftest import NODE_ID, VLLM_MODEL
+from conftest import NODE_ID
 from uni_agent.llm_router.collectors.collector import get_collector
 from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.store.data_store import DataStore
