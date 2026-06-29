@@ -61,6 +61,10 @@ class DataStore:
         """
         return self._metrics.get(node_id)
 
+    def get_metric_node_ids(self) -> list[str]:
+        """Return all node IDs that have metrics in the store."""
+        return self._metrics.all_ids()
+
     def refresh_metrics(self, new_data: dict[str, dict[str, Any]]) -> None:
         """Batch refresh metrics from collectors.
 
@@ -117,6 +121,18 @@ class DataStore:
             node_id: Target node.
         """
         self._kv.clear_replica(node_id)
+
+    def get_kv_block_count(self) -> int:
+        """Return the number of unique block hashes currently cached."""
+        return len(self._kv.replicas_by_block)
+
+    def kv_node_has_blocks(self, node_id: str) -> bool:
+        """Return True if node_id appears in at least one cached block."""
+        return any(node_id in replicas for replicas in self._kv.replicas_by_block.values())
+
+    def has_kv_block(self, block_hash: str) -> bool:
+        """Return True if block_hash is present in the cache index."""
+        return block_hash in self._kv.replicas_by_block
 
     # ── KV cache prefix hit rate queries ────────────────────────────────
 

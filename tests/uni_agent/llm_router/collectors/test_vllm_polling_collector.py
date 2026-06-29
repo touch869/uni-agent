@@ -2,9 +2,9 @@
 
 Test flow:
 1. Launch a real vLLM model service (Qwen3-4B).
-2. Create a Collector(HTTPTransport, VLLMMetricsDecoder) via BUILTIN_REGISTRY.
-3. Call start() to begin metrics polling; the decoder writes to MetricsStore.
-4. Verify that expected metrics exist in the store.
+2. Create a Collector(HTTPTransport, VLLMMetricsDecoder) via get_collector().
+3. Call start() to begin metrics polling; the collector writes to the store.
+4. Verify that expected metrics exist via DataStore.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from __future__ import annotations
 import time
 
 from conftest import NODE_ID, VLLM_MODEL
-from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
+from uni_agent.llm_router.collectors.collector import get_collector
 from uni_agent.llm_router.metric_spec import MetricKey
-from uni_agent.llm_router.store.metrics_store import MetricsStore
+from uni_agent.llm_router.store.data_store import DataStore
 
 
 POLL_INTERVAL = 2.0
@@ -22,7 +22,7 @@ HTTP_TIMEOUT = 10.0
 
 
 def _make_collector():
-    return BUILTIN_REGISTRY.get_collector(
+    return get_collector(
         "vllm_metrics",
         endpoints={NODE_ID: NODE_ID},
         interval=POLL_INTERVAL,
@@ -35,20 +35,20 @@ class TestVLLMMetricsCollectorWithRealService:
 
     def test_start_and_metrics_exist(self, vllm_service):
         """
-        Feature: Collector writes real metrics to MetricsStore after start()
+        Feature: Collector writes real metrics to the store after start()
         Expectation:
-            MetricsStore contains NODE_ID after one polling cycle.
+            DataStore contains NODE_ID after one polling cycle.
             kv_cache_usage_perc → float, num_requests_running/waiting → int.
         """
-        store = MetricsStore.singleton()
+        store = DataStore()
         collector = _make_collector()
 
         collector.start()
         time.sleep(POLL_INTERVAL + 3.0)
         collector.stop()
 
-        assert NODE_ID in store.all_ids(), (
-            f"Expected node_id '{NODE_ID}' in store, got {store.all_ids()}"
+        assert NODE_ID in store.get_metric_node_ids(), (
+            f"Expected node_id '{NODE_ID}' in store, got {store.get_metric_node_ids()}"
         )
         assert isinstance(store.get_metric(NODE_ID, MetricKey.KV_CACHE_USAGE_PERC), float)
         assert isinstance(store.get_metric(NODE_ID, MetricKey.NUM_REQUESTS_RUNNING), int)
@@ -62,7 +62,7 @@ class TestVLLMMetricsCollectorWithRealService:
             num_requests_running >= 0
             num_requests_waiting >= 0
         """
-        store = MetricsStore.singleton()
+        store = DataStore()
         collector = _make_collector()
 
         collector.start()
@@ -75,11 +75,11 @@ class TestVLLMMetricsCollectorWithRealService:
 
     def test_store_get_node_dict(self, vllm_service):
         """
-        Feature: MetricsStore.get(node_id) returns the full node metrics dict
+        Feature: DataStore.get_metrics(node_id) returns the full node metrics dict
         Expectation:
             Dict contains kv_cache_usage_perc, num_requests_running, num_requests_waiting.
         """
-        store = MetricsStore.singleton()
+        store = DataStore()
         collector = _make_collector()
 
         collector.start()
@@ -98,7 +98,7 @@ class TestVLLMMetricsCollectorWithRealService:
         Expectation:
             After 3 polling cycles the store contains data and values are reasonable.
         """
-        store = MetricsStore.singleton()
+        store = DataStore()
         collector = _make_collector()
 
         collector.start()
