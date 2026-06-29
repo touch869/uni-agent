@@ -18,8 +18,6 @@ class MetricsStore:
     concurrently.
 
     Singleton — use ``MetricsStore.singleton()`` to get the shared instance.
-    ``store_cls()`` (called by collectors) also returns the singleton via
-    the class-level ``__call__`` override.
 
     - ``get(node_id, key)``  → single value; falls back to ``METRIC_SPECS[key]["default"]``;
                                raises ``KeyError`` if key is not a valid canonical key

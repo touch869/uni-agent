@@ -18,8 +18,6 @@ class KVCacheStore:
     thread) concurrently.
 
     Singleton — use ``KVCacheStore.singleton()`` to get the shared instance.
-    ``store_cls()`` (called by collectors) also returns the singleton via
-    the class-level ``__call__`` override.
 
     Attributes:
         block_size: Learned block size (None until first BlockStored event).
