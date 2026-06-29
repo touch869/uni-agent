@@ -59,12 +59,16 @@ class HTTPTransport(Transport):
                     except Exception as exc:
                         logger.debug("Handler error for node %s: %s", nid, exc)
                 await asyncio.sleep(self._interval)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             pass
         finally:
-            if self._client is not None:
-                await self._client.aclose()
-                self._client = None
+            client, self._client = self._client, None
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception as exc:
+                    # May fail if called outside an async context (e.g. GC finalizer)
+                    logger.debug("HTTPTransport: aclose failed during cleanup: %s", exc)
 
     def stop(self) -> None:
         """Stop HTTP polling — lifecycle managed by Collector, nothing to do here."""

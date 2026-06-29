@@ -14,11 +14,8 @@ class Decoder(ABC):
     """Abstract base for data decoders.
 
     Subclasses implement ``decode()`` with their backend-specific
-    parsing logic and declare ``store_cls`` as a class attribute
-    to indicate which Store they write to.
+    parsing logic.
     """
-
-    store_cls: type  # Store class this decoder writes to
 
     @abstractmethod
     def decode(self, raw_data: bytes | str, node_id: str) -> Any:

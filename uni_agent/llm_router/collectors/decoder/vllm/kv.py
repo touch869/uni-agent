@@ -15,7 +15,6 @@ from uni_agent.llm_router.collectors.decoder.base import Decoder
 from uni_agent.llm_router.collectors.decoder.vllm.kv_event import KVCacheEvent
 from uni_agent.llm_router.collectors.decoder.vllm.kv_update import KVCacheUpdate
 from uni_agent.llm_router.utils.hash import compute_hash
-from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +31,6 @@ class VLLMKVDecoder(Decoder):
             hash computation.
         _block_size: Learned block size from first event.
     """
-
-    store_cls = KVCacheStore
 
     def __init__(self) -> None:
         self.remote_to_local_block_hash: dict[str, str] = {}
