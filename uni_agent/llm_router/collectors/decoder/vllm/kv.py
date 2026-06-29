@@ -60,16 +60,10 @@ class VLLMKVDecoder(Decoder):
             # Determine if raw is single event or multiple events
             # Single: [timestamp, [...]] where timestamp is int
             # Multiple: [[timestamp, [...]], ...] where first element is list
-            if isinstance(raw, list) and len(raw) > 0:
-                if isinstance(raw[0], list):
-                    # Multiple events (replay)
-                    event_payloads = raw
-                else:
-                    # Single event (real-time)
-                    event_payloads = [raw]
-            else:
+            if not isinstance(raw, list) or len(raw) == 0:
                 logger.warning("Unexpected msgpack format from node %s", node_id)
                 return None
+            event_payloads = raw if isinstance(raw[0], list) else [raw]
 
             # Aggregate all operations from all payloads
             add_blocks: list[str] = []
@@ -83,16 +77,20 @@ class VLLMKVDecoder(Decoder):
                 for event in events:
                     if event.event_type == "stored":
                         result = self._process_stored(event)
-                        if result:
-                            add_blocks.extend(result["add_blocks"])
-                            if result["block_size"] is not None:
-                                learned_block_size = result["block_size"]
+                        if result is None:
+                            continue
+                        add_blocks.extend(result["add_blocks"])
+                        if result["block_size"] is not None:
+                            learned_block_size = result["block_size"]
 
                     elif event.event_type == "removed":
                         remove_blocks.extend(self._process_removed(event))
 
                     elif event.event_type == "clear":
                         clear_all = True
+                    
+                    else:
+                        raise ValueError(f"Unknow event.event_type {event.event_type}.")
 
             return KVCacheUpdate(
                 node_id=node_id,

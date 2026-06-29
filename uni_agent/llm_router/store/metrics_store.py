@@ -40,19 +40,18 @@ class MetricsStore:
             (i.e. not present in ``METRIC_SPECS``).
         ``get(node_id)``       → entire node dict
         """
-        if key is not None:
-            if key not in METRIC_SPECS:
-                raise KeyError(
-                    f"Unknown metric key '{key}'. "
-                    f"Valid keys: {sorted(METRIC_SPECS.keys())}"
-                )
-            with self._lock:
-                node = self._data.get(node_id, {})
-                if key in node:
-                    return node[key]
-                return METRIC_SPECS[key]["default"]
-        with self._lock:
+        if key is None:
             return dict(self._data.get(node_id, {}))
+        
+        if key not in METRIC_SPECS:
+            raise KeyError(
+                f"Unknown metric key '{key}'. "
+                f"Valid keys: {sorted(METRIC_SPECS.keys())}"
+            )
+        node = self._data.get(node_id, {})
+        if key in node:
+            return node[key]
+        return METRIC_SPECS[key]["default"]
 
     def refresh(self, new_data: dict[str, dict[str, Any]]) -> None:
         """Batch refresh from collectors.

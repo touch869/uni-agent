@@ -36,14 +36,19 @@ class KVCacheStore:
 
     def clear_replica(self, replica_id: str) -> None:
         """Clear all blocks for a replica from the reverse index.
+
+        Iterates ``replicas_by_block`` to remove the replica from every
+        block entry, then deletes empty entries.  O(n) in the number of
+        unique blocks, but replica count is typically small (< 100).
         """
         with self._lock:
             stale_hashes: list[str] = []
             for bh, replicas in self.replicas_by_block.items():
-                if replica_id in replicas:
-                    replicas.discard(replica_id)
-                    if not replicas:
-                        stale_hashes.append(bh)
+                if replica_id not in replicas:
+                    continue
+                replicas.discard(replica_id)
+                if not replicas:
+                    stale_hashes.append(bh)
             for bh in stale_hashes:
                 del self.replicas_by_block[bh]
 
@@ -61,10 +66,11 @@ class KVCacheStore:
         """Remove blocks from a replica, updating the reverse index."""
         with self._lock:
             for bh in block_hashes:
-                if bh in self.replicas_by_block:
-                    self.replicas_by_block[bh].discard(replica_id)
-                    if not self.replicas_by_block[bh]:
-                        del self.replicas_by_block[bh]
+                if bh not in self.replicas_by_block:
+                    continue
+                self.replicas_by_block[bh].discard(replica_id)
+                if not self.replicas_by_block[bh]:
+                    del self.replicas_by_block[bh]
 
     # ── Prefix hit rate queries ─────────────────────────────────────────
 

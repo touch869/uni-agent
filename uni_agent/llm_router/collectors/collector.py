@@ -44,6 +44,8 @@ class Collector:
             result = self._decoder.decode(raw_data, node_id)
             if result is not None:
                 self._data_store.apply(result)
+            else:
+                logger.warning("the return of decoder.decode is None.")
 
         self._loop_thread = threading.Thread(
             target=self._loop.run_forever,

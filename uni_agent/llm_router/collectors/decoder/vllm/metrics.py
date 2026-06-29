@@ -53,14 +53,18 @@ class VLLMMetricsDecoder(Decoder):
         for line in raw_data.splitlines():
             if line.startswith("#") or not line.strip():
                 continue
+
             try:
                 raw_name = line.split("{")[0] if "{" in line else line.split()[0]
                 value = float(line.split()[-1])
             except (ValueError, IndexError):
+                logger.warning(f"decode failed: {line}")
                 continue
+
             canonical = self._PROMETHEUS_MAP.get(raw_name)
-            if canonical:
-                value_type = METRIC_SPECS[canonical].get("value_type", float)
-                result[canonical] = value_type(value)
+            if not canonical:
+                continue
+            value_type = METRIC_SPECS[canonical].get("value_type", float)
+            result[canonical] = value_type(value)
 
         return MetricsUpdate(node_id=node_id, metrics=result)

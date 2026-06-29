@@ -42,6 +42,8 @@ class DataStore:
             self._apply_kv_update(update)
         elif isinstance(update, MetricsUpdate):
             self._apply_metrics_update(update)
+        else:
+            raise ValueError(f"DataStore not support {update} type.")
 
     def _apply_kv_update(self, update: KVCacheUpdate) -> None:
         """Apply KVCacheUpdate — block_size learning + clear/remove/add."""
