@@ -8,10 +8,7 @@ from dataclasses import dataclass
 @dataclass
 class KVCacheUpdate:
     """Structured update command for KVCacheStore.
-
-    Returned by VLLMKVDecoder.decode() — contains all store operations
-    to be applied by Collector via DataStore.
-
+    
     Attributes:
         node_id: Target endpoint identifier.
         add_blocks: Block hashes to add (empty if none).

@@ -12,13 +12,6 @@ from uni_agent.llm_router.utils.hash import get_prefix_hashes
 class KVCacheStore:
     """Mutable data carrier for KV cache mapping tables.
 
-    Thread-safe — a ``threading.Lock`` protects all reads and writes,
-    because the store can be written by ZMQ event collector tasks (on
-    the event-loop thread) and read by the balancer (on a Ray actor
-    thread) concurrently.
-
-    Singleton — use ``KVCacheStore.singleton()`` to get the shared instance.
-
     Attributes:
         block_size: Learned block size (None until first BlockStored event).
         replicas_by_block: local prefix hash → set of replica_ids that
@@ -43,10 +36,6 @@ class KVCacheStore:
 
     def clear_replica(self, replica_id: str) -> None:
         """Clear all blocks for a replica from the reverse index.
-
-        Iterates ``replicas_by_block`` to remove the replica from every
-        block entry, then deletes empty entries.  O(n) in the number of
-        unique blocks, but replica count is typically small (< 100).
         """
         with self._lock:
             stale_hashes: list[str] = []

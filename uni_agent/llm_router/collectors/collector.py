@@ -1,9 +1,4 @@
 """Collector — unified collector interface combining Transport + Decoder.
-
-Composes a ``Transport`` (data acquisition), a ``Decoder`` (data parsing),
-and writes results via ``DataStore``.  Both ``start()`` and ``stop()``
-are synchronous — async logic is encapsulated internally so the upper layer
-(e.g. Ray actor) can call them without ``await``.
 """
 
 from __future__ import annotations
@@ -13,10 +8,10 @@ import logging
 import threading
 
 from concurrent.futures import Future
-from typing import Any
 
 from uni_agent.llm_router.collectors.transport.base import Transport
 from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.config.collector import CollectorConfig
 from uni_agent.llm_router.store.data_store import DataStore
 
 logger = logging.getLogger(__name__)
@@ -24,10 +19,6 @@ logger = logging.getLogger(__name__)
 
 class Collector:
     """Unified collector — composes Transport + Decoder.
-
-    The Collector owns the lifecycle: it starts the Transport on a
-    dedicated event-loop thread.  The handler calls Decoder.decode()
-    and writes results via DataStore.
 
     Args:
         transport: Transport instance (ZMQ, HTTP, etc.)
@@ -45,11 +36,8 @@ class Collector:
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Start the collector — launch event-loop thread and subscribe.
-
-        Spawns a dedicated event-loop thread, starts the Transport's
-        subscribe loop on it.  The handler calls Decoder.decode() and
-        writes results via DataStore.  Synchronous — no ``await`` needed.
+        """
+        Start the collector — launch event-loop thread and subscribe.
         """
         def handler(raw_data: bytes | str, node_id: str) -> None:
             """Handler: decode and apply via DataStore."""
@@ -69,16 +57,11 @@ class Collector:
         )
 
     def stop(self) -> None:
-        """Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
-
-        Cancels all asyncio tasks on the loop and waits for their finally blocks
-        to complete *before* stopping the loop.  This prevents two failure modes:
-        1. "Task was destroyed but pending" — task GC'd before finally runs.
-        2. GeneratorExit / sniffio errors — finally block runs outside async context.
-
-        Synchronous — blocks until all cleanup is complete.
         """
-        # Signal transport to stop (ZMQ cancels its tasks; HTTP is a no-op)
+        Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
+        """
+        # Transport closes protocol-level resources (sockets/clients);
+        # we own task cancellation and finally-block draining below.
         self._transport.stop()
 
         if self._loop.is_running():
@@ -112,52 +95,55 @@ class Collector:
 # ── Factory function ───────────────────────────────────────────────────
 
 
-def get_collector(name: str, **kwargs: Any) -> Collector:
-    """Create a Collector by name.
+def get_collector(
+    name: str,
+    collectors_config: CollectorConfig,
+    server_addresses: dict[str, str] | None = None,
+    kv_event_endpoints: dict[str, list[str]] | None = None,
+) -> Collector:
+    """Create a Collector by name — one place does both composition and config binding.
 
     Args:
-        name: Collector type — "vllm_metrics" or "vllm_zmq".
-        **kwargs: Transport constructor arguments.
+        name: Collector type — ``"vllm_metrics"`` or ``"vllm_zmq"``.
+        collectors_config: ``CollectorConfig`` carrying connection-type knobs.
+        server_addresses: ``{node_id: ip:port}`` for HTTP transport
+            (used by ``"vllm_metrics"``).
+        kv_event_endpoints: ``{node_id: [sub_addr, replay_addr]}`` for ZMQ
+            transport (used by ``"vllm_zmq"``).
 
     Returns:
-        Configured Collector instance.
+        Configured ``Collector`` instance.
 
     Raises:
-        ValueError: If name is unknown.
-
-    Examples:
-        # Metrics collector (HTTP polling)
-        collector = get_collector(
-            "vllm_metrics",
-            endpoints={"node1": "127.0.0.1:8000"},
-            interval=5.0,
-            http_timeout=10.0
-        )
-
-        # KV cache collector (ZMQ events)
-        collector = get_collector(
-            "vllm_zmq",
-            endpoints={"node1": "127.0.0.1:5555"}
-        )
+        ValueError: If ``name`` is unknown.
     """
     if name == "vllm_metrics":
         from uni_agent.llm_router.collectors.transport.http import HTTPTransport
         from uni_agent.llm_router.collectors.decoder.vllm.metrics import VLLMMetricsDecoder
 
-        transport = HTTPTransport(**kwargs)
-        decoder = VLLMMetricsDecoder()
-        return Collector(transport, decoder)
+        hp = collectors_config.http_polling
+        transport = HTTPTransport(
+            endpoints=server_addresses or {},
+            interval=hp["polling_interval"],
+            http_timeout=hp["http_timeout"],
+        )
+        return Collector(transport, VLLMMetricsDecoder())
 
-    elif name == "vllm_zmq":
+    if name == "vllm_zmq":
         from uni_agent.llm_router.collectors.transport.zmq import ZMQTransport
         from uni_agent.llm_router.collectors.decoder.vllm.kv import VLLMKVDecoder
 
-        transport = ZMQTransport(**kwargs)
-        decoder = VLLMKVDecoder()
-        return Collector(transport, decoder)
-
-    else:
-        raise ValueError(
-            f"Unknown collector: '{name}'. "
-            f"Available: ['vllm_metrics', 'vllm_zmq']"
+        lc = collectors_config.long_connection
+        transport = ZMQTransport(
+            endpoints=kv_event_endpoints or {},
+            base_retry_delay=lc["base_retry_delay"],
+            max_retry_delay=lc["max_retry_delay"],
+            max_retry_attempts=lc["max_retry_attempts"],
+            retry_backoff_factor=lc["retry_backoff_factor"],
         )
+        return Collector(transport, VLLMKVDecoder())
+
+    raise ValueError(
+        f"Unknown collector: '{name}'. "
+        f"Available: ['vllm_metrics', 'vllm_zmq']"
+    )

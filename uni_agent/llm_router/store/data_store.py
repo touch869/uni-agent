@@ -1,8 +1,4 @@
 """StoreProvider — unified data access layer for all stores.
-
-Provides a single entry point for both reads and writes to MetricsStore
-and KVCacheStore. Upper layers (Collector, strategy) access data only
-through StoreProvider, never directly through stores.
 """
 
 from __future__ import annotations
@@ -38,12 +34,6 @@ class DataStore:
 
     def apply(self, update: KVCacheUpdate | MetricsUpdate) -> None:
         """Apply a structured update produced by a Decoder.
-
-        Single write entry point called by ``Collector`` — dispatches by
-        update type so the Collector stays free of any knowledge of
-        concrete update types.  Unknown update types are silently
-        ignored (forward-compat: new update types added later won't
-        break existing collectors).
 
         Args:
             update: A ``KVCacheUpdate`` or ``MetricsUpdate`` from a Decoder.

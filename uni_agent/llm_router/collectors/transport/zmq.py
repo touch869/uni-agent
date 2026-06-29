@@ -28,6 +28,7 @@ class _EndpointSocketSet:
     context: zmq.asyncio.Context
     sub_socket: zmq.asyncio.Socket
     replay_socket: zmq.asyncio.Socket
+    closed: bool = False
 
 
 class ZMQTransport(Transport):
@@ -71,11 +72,9 @@ class ZMQTransport(Transport):
         self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
         self._retry_counts: dict[str, int] = {}
         self._sub_tasks: dict[str, asyncio.Task] = {}
-        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Spawn per-endpoint subscription tasks, deliver payloads to handler."""
-        self._loop = asyncio.get_running_loop()
         sub_tasks = []
         for node_id in self._sub_endpoints:
             sub_addr = self._sub_endpoints[node_id]
@@ -94,28 +93,18 @@ class ZMQTransport(Transport):
             self._close_all_zmq_sockets()
 
     def stop(self) -> None:
-        """Stop ZMQ subscription synchronously — blocks until cleanup is done."""
+        """Signal stop, cancel tasks, close ZMQ sockets. No loop dependency.
+
+        This method only include:
+          1. sets the stop flag so subscribe loops exit,
+          2. cancels tasks (synchronous, no loop ref needed),
+          3. closes sockets/contexts (idempotent via ``closed`` guard).
+        """
         self._stopped = True
         for task in self._sub_tasks.values():
             task.cancel()
-        for task in self._sub_tasks.values():
-            try:
-                if self._loop is not None:
-                    done_future = asyncio.run_coroutine_threadsafe(
-                        self._wait_task(task), self._loop,
-                    )
-                    done_future.result(timeout=10)
-            except (asyncio.CancelledError, Exception) as exc:
-                logger.debug("Error waiting for ZMQ sub task to finish: %s", exc)
         self._sub_tasks.clear()
         self._close_all_zmq_sockets()
-
-    async def _wait_task(self, task: asyncio.Task) -> None:
-        """Await a task — used by stop() for blocking wait."""
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
 
     # ── ZMQ connection management ───────────────────────────────────────
 
@@ -148,10 +137,12 @@ class ZMQTransport(Transport):
             return False
 
     def _close_zmq_sockets_for(self, node_id: str) -> None:
-        """Safely close ZMQ sockets and context for a single endpoint."""
+        """Safely close ZMQ sockets and context for a single endpoint.
+        """
         sockets = self._endpoint_sockets.pop(node_id, None)
-        if sockets is None:
+        if sockets is None or sockets.closed:
             return
+        sockets.closed = True
         sockets.sub_socket.close()
         sockets.replay_socket.close()
         sockets.context.term()
