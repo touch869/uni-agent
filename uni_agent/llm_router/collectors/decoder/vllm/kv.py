@@ -13,7 +13,7 @@ import msgpack
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
 from uni_agent.llm_router.collectors.decoder.vllm.kv_event import KVCacheEvent
-from uni_agent.llm_router.collectors.decoder.vllm.kv_update import KVCacheUpdate
+from uni_agent.llm_router.store.updates import KVCacheUpdate
 from uni_agent.llm_router.utils.hash import compute_hash
 
 logger = logging.getLogger(__name__)
