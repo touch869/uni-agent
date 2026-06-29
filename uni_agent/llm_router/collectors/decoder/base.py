@@ -1,9 +1,4 @@
 """Decoder — abstract base for data decoding.
-
-A Decoder receives raw data from a Transport and decodes it into
-structured update objects (e.g. ``KVCacheUpdate``, ``MetricsUpdate``).
-It does NOT write to a store — the ``Collector`` applies the returned
-update via ``DataStore.apply()``.
 """
 
 from __future__ import annotations

@@ -16,13 +16,16 @@ import pytest
 
 from conftest import NODE_ID, ZMQ_SUB_PORT, ZMQ_REPLAY_PORT, VLLM_MODEL, send_inference_request
 from uni_agent.llm_router.collectors.collector import get_collector
+from uni_agent.llm_router.config.collector import CollectorConfig
 from uni_agent.llm_router.store.data_store import DataStore
 
 
 def _make_collector():
+    cfg = CollectorConfig()  # default long_connection knobs
     return get_collector(
         "vllm_zmq",
-        endpoints={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]},
+        cfg,
+        kv_event_endpoints={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]},
     )
 
 

@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 class VLLMMetricsDecoder(Decoder):
     """vLLM Prometheus metrics decoder — parses HTTP response text.
 
-    Returns structured metrics. Does NOT write to store — Collector
-    handles writes via DataStore.
+    Returns structured metrics.
 
     vLLM Prometheus raw name → canonical key mapping:
         ``vllm:kv_cache_usage_perc``  → ``KV_CACHE_USAGE_PERC``

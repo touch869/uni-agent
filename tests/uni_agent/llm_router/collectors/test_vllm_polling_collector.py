@@ -13,6 +13,7 @@ import time
 
 from conftest import NODE_ID
 from uni_agent.llm_router.collectors.collector import get_collector
+from uni_agent.llm_router.config.collector import CollectorConfig
 from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.store.data_store import DataStore
 
@@ -22,11 +23,13 @@ HTTP_TIMEOUT = 10.0
 
 
 def _make_collector():
+    cfg = CollectorConfig(
+        http_polling={"polling_interval": POLL_INTERVAL, "http_timeout": HTTP_TIMEOUT},
+    )
     return get_collector(
         "vllm_metrics",
-        endpoints={NODE_ID: NODE_ID},
-        interval=POLL_INTERVAL,
-        http_timeout=HTTP_TIMEOUT,
+        cfg,
+        server_addresses={NODE_ID: NODE_ID},
     )
 
 

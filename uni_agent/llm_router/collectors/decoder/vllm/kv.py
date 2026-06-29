@@ -23,7 +23,6 @@ class VLLMKVDecoder(Decoder):
     """vLLM KV-cache decoder — msgpack payload → KVCacheUpdate.
 
     Parses msgpack payloads and returns structured update commands.
-    Does NOT write to store — Collector handles writes via DataStore.
 
     Attributes:
         remote_to_local_block_hash: Mapping from vLLM remote block_hash

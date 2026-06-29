@@ -10,9 +10,6 @@ from typing import Any
 class MetricsUpdate:
     """Structured update command for MetricsStore.
 
-    Returned by VLLMMetricsDecoder.decode() — contains metrics data
-    to be applied by Collector via DataStore.
-
     Attributes:
         node_id: Target endpoint identifier.
         metrics: Dict of canonical_key → value.

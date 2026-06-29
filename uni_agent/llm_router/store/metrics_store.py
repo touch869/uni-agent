@@ -12,13 +12,6 @@ from uni_agent.llm_router.metric_spec import METRIC_SPECS
 class MetricsStore:
     """Unified metrics store: ``{node_id: {canonical_key: value}}``.
 
-    Thread-safe — a ``threading.Lock`` protects all reads and writes,
-    because the store can be written by collector asyncio tasks (on the
-    event-loop thread) and read by the balancer (on a Ray actor thread)
-    concurrently.
-
-    Singleton — use ``MetricsStore.singleton()`` to get the shared instance.
-
     - ``get(node_id, key)``  → single value; falls back to ``METRIC_SPECS[key]["default"]``;
                                raises ``KeyError`` if key is not a valid canonical key
     - ``get(node_id)``       → entire node dict (empty dict if unknown)

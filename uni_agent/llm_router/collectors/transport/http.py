@@ -71,4 +71,10 @@ class HTTPTransport(Transport):
                     logger.debug("HTTPTransport: aclose failed during cleanup: %s", exc)
 
     def stop(self) -> None:
-        """Stop HTTP polling — lifecycle managed by Collector, nothing to do here."""
+        """No protocol-level resources to close here.
+
+        Per the Transport contract, task cancellation is owned by the
+        ``Collector``. The httpx client's ``aclose()`` runs in
+        ``subscribe``'s finally block, drained by ``Collector``'s
+        ``_cancel_and_drain`` — nothing for this method to do.
+        """
