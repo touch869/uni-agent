@@ -122,7 +122,7 @@ if $RUN_ST_CPU; then
     echo "--- st-cpu: balancer integration over Ray (CPU) ---"
     cleanup_processes
     set +e
-    python -m pytest "${SCRIPT_DIR}" -m "st and cpu" -v
+    python -m pytest "${SCRIPT_DIR}/test_balancer_integration_on_cpu.py" -m "st and cpu" -v
     code=$?
     set -e
     print_summary "st-cpu" "$code"
