@@ -194,7 +194,7 @@ class RouteDataProvider:
             return None
 
         kv_store = self._kv_store
-        if kv_store.block_size is None or node_id not in kv_store.cpu_tracking_replicas:
+        if kv_store.block_size is None:
             return None
 
         prefix_hashes = get_prefix_hashes(prompt_ids, kv_store.block_size)

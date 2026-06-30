@@ -11,15 +11,12 @@ class KVCacheStore:
     """Mutable data carrier for tiered KV-cache mapping tables.
 
     replicas_by_block remains a GPU-only compatibility view.
-    cpu_tracking_replicas distinguishes an empty CPU cache from unavailable
-    CPU-tier data.
     """
 
     block_size: int | None = None
     replicas_by_tier_and_block: dict[tuple[str, str], set[str]] = field(
         default_factory=dict
     )
-    cpu_tracking_replicas: set[str] = field(default_factory=set)
 
     @property
     def replicas_by_block(self) -> dict[str, set[str]]:
@@ -68,8 +65,6 @@ class KVCacheStore:
     ) -> None:
         """Add blocks to a tier-specific reverse index."""
         normalized_tier = self._normalize_tier(tier)
-        if normalized_tier == "cpu":
-            self.cpu_tracking_replicas.add(replica_id)
         for block_hash in block_hashes:
             self.replicas_by_tier_and_block.setdefault(
                 (normalized_tier, block_hash), set()
@@ -81,13 +76,7 @@ class KVCacheStore:
         block_hashes: Iterable[str],
         tier: str = "gpu",
     ) -> None:
-        """Remove blocks from a tier-specific reverse index.
-
-        For CPU tier, retains the replica in ``cpu_tracking_replicas`` if it
-        was already there (the replica still has CPU-tier data, just fewer
-        blocks).  Does NOT add unknown replicas — a remove event should not
-        mark a replica as having CPU data when it never stored any.
-        """
+        """Remove blocks from a tier-specific reverse index."""
         normalized_tier = self._normalize_tier(tier)
         for block_hash in block_hashes:
             key = (normalized_tier, block_hash)

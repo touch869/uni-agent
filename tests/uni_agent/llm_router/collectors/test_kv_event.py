@@ -83,8 +83,6 @@ def test_store_keeps_gpu_and_cpu_tables_separate() -> None:
     assert store.replicas_by_tier_and_block == {
         ("gpu", "hash-1"): {"replica-1"}
     }
-    assert store.cpu_tracking_replicas == {"replica-1"}
-
     store.clear_replica("replica-1")
     assert store.replicas_by_block == {}
     assert store.replicas_by_tier_and_block == {}
@@ -226,18 +224,14 @@ def test_provider_computes_cpu_contiguous_prefix_hit_rate() -> None:
     ) == 0.5
     assert provider.get_tier_prefix_hit_rate(
         "unknown-replica", prompt_ids, "cpu"
-    ) is None
+    ) == 0.0
     assert provider.get_tier_prefix_hit_rate(
         "replica-1", prompt_ids, "ssd"
     ) is None
 
 
-def test_cpu_remove_does_not_mark_replica_as_tracked() -> None:
-    """A CPU BlockRemoved on a replica that never stored CPU data must not
-    mark that replica as having CPU-tier data (which would make the provider
-    report a 0.0 hit rate instead of ``None`` for "data unavailable")."""
+def test_cpu_remove_for_unknown_replica_is_noop() -> None:
     store = KVCacheStore()
     store.remove_blocks("gpu-only-replica", ["hash-1"], tier="cpu")
 
-    assert "gpu-only-replica" not in store.cpu_tracking_replicas
     assert store.replicas_by_tier_and_block == {}

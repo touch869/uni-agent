@@ -227,5 +227,4 @@ def test_native_cpu_offload_events_update_cpu_tier(vllm_kv_offload_service):
         )
 
     assert any(NODE_ID in replicas for replicas in cpu_entries.values())
-    assert NODE_ID in store.cpu_tracking_replicas
     assert store.get_replicas(next(iter(cpu_entries)), tier="cpu") is not None
