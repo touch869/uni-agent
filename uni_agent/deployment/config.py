@@ -59,7 +59,7 @@ class LocalDeploymentConfig(BaseModel):
     image: str = "python:3.12"
     """Container image used for the sandbox."""
     command: str = (
-        "python3 -m pip install -q swe-rex && "
+        "python3 -m pip install -q swe-rex -i https://pypi.tuna.tsinghua.edu.cn/simple && "
         "python3 -m swerex.server --host 0.0.0.0 --port {port} --auth-token {token}"
     )
     """Command to run inside the sandbox."""
