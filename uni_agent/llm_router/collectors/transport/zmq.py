@@ -38,9 +38,7 @@ class ZMQTransport(Transport):
     background coroutine — all endpoints subscribe concurrently.
 
     Args:
-        endpoints: ``{node_id: [sub_ip:port, replay_ip:port]}``
-            — per-endpoint ZMQ addresses.
-        topic: ZMQ subscription topic filter (default ``"kv-events"``).
+        endpoints: ``{node_id: [sub_ip:port, replay_ip:port, publisher, topic]}``
         base_retry_delay: Initial retry delay in seconds.
         max_retry_delay: Maximum retry delay cap in seconds.
         max_retry_attempts: Maximum number of retries per endpoint.
@@ -50,23 +48,33 @@ class ZMQTransport(Transport):
     def __init__(
         self,
         endpoints: dict[str, list[str]],
-        topic: str = "kv-events",
         base_retry_delay: float = 1.0,
         max_retry_delay: float = 30.0,
         max_retry_attempts: int = 5,
         retry_backoff_factor: float = 2.0,
     ) -> None:
-        self._topic = topic
         self._base_retry_delay = base_retry_delay
         self._max_retry_delay = max_retry_delay
         self._max_retry_attempts = max_retry_attempts
         self._retry_backoff_factor = retry_backoff_factor
 
+        # endpoints: {node_id: [sub_endpoint, replay_endpoint, publisher, topic]}
         self._sub_endpoints: dict[str, str] = {}
         self._replay_endpoints: dict[str, str] = {}
+        self._topics: dict[str, str] = {}
         for node_id, addrs in endpoints.items():
+            if len(addrs) < 4:
+                raise ValueError(
+                    f"endpoint '{node_id}' needs 4 elements "
+                    f"[sub, replay, publisher, topic], got {len(addrs)}"
+                )
+            if addrs[2] != "zmq":
+                raise ValueError(
+                    f"endpoint '{node_id}' publisher must be 'zmq', got '{addrs[2]}'"
+                )
             self._sub_endpoints[node_id] = f"tcp://{addrs[0]}"
             self._replay_endpoints[node_id] = f"tcp://{addrs[1]}"
+            self._topics[node_id] = addrs[3]
 
         self._stopped = False
         self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
@@ -117,7 +125,7 @@ class ZMQTransport(Transport):
 
             sub_socket = ctx.socket(zmq.SUB)
             sub_socket.connect(sub_addr)
-            sub_socket.setsockopt_string(zmq.SUBSCRIBE, self._topic)
+            sub_socket.setsockopt_string(zmq.SUBSCRIBE, self._topics[node_id])
 
             replay_socket = ctx.socket(zmq.REQ)
             replay_socket.connect(replay_addr)

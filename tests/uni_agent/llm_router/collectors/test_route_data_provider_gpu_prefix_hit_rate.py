@@ -64,7 +64,7 @@ def _make_provider(node_id: str) -> CollectorProvider:
         collectors_config=CollectorConfig(),
         collection_names=["vllm_zmq"],
         kv_event_endpoints={
-            node_id: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"],
+            node_id: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}", "zmq", "kv-events"],
         },
     )
 

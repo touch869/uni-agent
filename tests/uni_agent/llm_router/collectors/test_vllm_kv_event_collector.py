@@ -25,7 +25,7 @@ def _make_collector():
     return get_collector(
         "vllm_zmq",
         cfg,
-        kv_event_endpoints={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}"]},
+        kv_event_endpoints={NODE_ID: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}", "zmq", "kv-events"]},
     )
 
 
