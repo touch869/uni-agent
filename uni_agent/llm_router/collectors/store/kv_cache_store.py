@@ -1,6 +1,4 @@
-"""
-KVCacheStore — backend-agnostic data carrier for KV cache mapping tables.
-"""
+"""Tier-aware KV-cache mapping store."""
 
 from __future__ import annotations
 
@@ -10,51 +8,79 @@ from dataclasses import dataclass, field
 
 @dataclass
 class KVCacheStore:
-    """Mutable data carrier for KV cache mapping tables.
+    """Mutable data carrier for tiered KV-cache mapping tables.
 
-    This is the single source of truth for all cross-replica KV cache
-    state. 
-
-    Attributes:
-        block_size: Learned block size (``None`` until first BlockStored event).
-        replicas_by_block: local prefix hash → set of replica_ids that
-            cache it.  Aligns with aibrix's ``prefixMap`` (hash → pods).
+    replicas_by_block remains a GPU-only compatibility view.
     """
 
     block_size: int | None = None
-    replicas_by_block: dict[str, set[str]] = field(default_factory=dict)
+    replicas_by_tier_and_block: dict[tuple[str, str], set[str]] = field(
+        default_factory=dict
+    )
 
-    # ── Replica management ──────────────────────────────────────────────
+    @property
+    def replicas_by_block(self) -> dict[str, set[str]]:
+        """GPU-only compatibility view keyed by local prefix hash."""
+        return {
+            block_hash: replicas
+            for (tier, block_hash), replicas in self.replicas_by_tier_and_block.items()
+            if tier == "gpu"
+        }
 
-    def clear_replica(self, replica_id: str) -> None:
-        """Clear all blocks for a replica from the reverse index.
+    @staticmethod
+    def _normalize_tier(tier: str) -> str:
+        normalized = tier.lower()
+        if normalized not in {"gpu", "cpu"}:
+            raise ValueError(f"Unsupported KV cache tier: {tier!r}")
+        return normalized
 
-        Iterates ``replicas_by_block`` to remove the replica from every
-        block entry, then deletes empty entries.  O(n) in the number of
-        unique blocks, but replica count is typically small (< 100).
-        """
-        stale_hashes: list[str] = []
-        for bh, replicas in self.replicas_by_block.items():
-            if replica_id in replicas:
-                replicas.discard(replica_id)
-                if not replicas:
-                    stale_hashes.append(bh)
-        for bh in stale_hashes:
-            del self.replicas_by_block[bh]
+    def get_replicas(self, block_hash: str, tier: str = "gpu") -> set[str] | None:
+        """Return replicas for a block in the selected tier."""
+        return self.replicas_by_tier_and_block.get(
+            (self._normalize_tier(tier), block_hash)
+        )
 
-    # ── Block management ────────────────────────────────────────────────
+    def clear_replica(self, replica_id: str, tier: str | None = None) -> None:
+        """Clear a replica from one tier, or from both tiers by default."""
+        tiers = ("gpu", "cpu") if tier is None else (tier,)
+        for selected_tier in tiers:
+            normalized_tier = self._normalize_tier(selected_tier)
+            stale_keys: list[tuple[str, str]] = []
+            for key, replicas in self.replicas_by_tier_and_block.items():
+                current_tier, _ = key
+                if current_tier != normalized_tier:
+                    continue
+                if replica_id in replicas:
+                    replicas.discard(replica_id)
+                    if not replicas:
+                        stale_keys.append(key)
+            for key in stale_keys:
+                del self.replicas_by_tier_and_block[key]
 
-    def add_blocks(self, replica_id: str, block_hashes: Iterable[str]) -> None:
-        """Add blocks to a replica, updating the reverse index."""
-        for bh in block_hashes:
-            if bh not in self.replicas_by_block:
-                self.replicas_by_block[bh] = set()
-            self.replicas_by_block[bh].add(replica_id)
+    def add_blocks(
+        self,
+        replica_id: str,
+        block_hashes: Iterable[str],
+        tier: str = "gpu",
+    ) -> None:
+        """Add blocks to a tier-specific reverse index."""
+        normalized_tier = self._normalize_tier(tier)
+        for block_hash in block_hashes:
+            self.replicas_by_tier_and_block.setdefault(
+                (normalized_tier, block_hash), set()
+            ).add(replica_id)
 
-    def remove_blocks(self, replica_id: str, block_hashes: Iterable[str]) -> None:
-        """Remove blocks from a replica, updating the reverse index."""
-        for bh in block_hashes:
-            if bh in self.replicas_by_block:
-                self.replicas_by_block[bh].discard(replica_id)
-                if not self.replicas_by_block[bh]:
-                    del self.replicas_by_block[bh]
+    def remove_blocks(
+        self,
+        replica_id: str,
+        block_hashes: Iterable[str],
+        tier: str = "gpu",
+    ) -> None:
+        """Remove blocks from a tier-specific reverse index."""
+        normalized_tier = self._normalize_tier(tier)
+        for block_hash in block_hashes:
+            key = (normalized_tier, block_hash)
+            if key in self.replicas_by_tier_and_block:
+                self.replicas_by_tier_and_block[key].discard(replica_id)
+                if not self.replicas_by_tier_and_block[key]:
+                    del self.replicas_by_tier_and_block[key]

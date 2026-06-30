@@ -170,7 +170,7 @@ class RouteDataProvider:
         prefix_match_replicas: dict[str, int] = {}
 
         for i, hs in enumerate(hash_strs):
-            cached_replicas = kv_store.replicas_by_block.get(hs)
+            cached_replicas = kv_store.get_replicas(hs, tier="gpu")
             if cached_replicas is None or len(cached_replicas) == 0:
                 break  # chain break — no replica caches this hash
 
@@ -185,26 +185,30 @@ class RouteDataProvider:
     def get_tier_prefix_hit_rate(
         self, node_id: str, prompt_ids: list[int], tier: str,
     ) -> float | None:
-        """Query tier-level prefix cache hit rate (slow-path data).
+        """Return the contiguous prefix hit rate for a slow cache tier.
 
-        v1: reads from snapshot (PollingCollector for Mooncake metrics).
-        v2: calls Mooncake /batch_query_keys API for real-time query.
-
-        Args:
-            node_id: Target node.
-            prompt_ids: Current request's prompt token IDs.
-            tier: ``"cpu"`` or ``"ssd"``.
-
-        Returns:
-            Hit rate 0.0–1.0, or ``None`` when no tier data is available
-            (mooncake collector not yet implemented). Callers should treat
-            ``None`` as "data missing" and degrade to 0 with a warning,
-            NOT as a genuine 0% hit.
+        Native vLLM CPU-offload data is read from KVCacheStore. SSD remains
+        unavailable until an SSD-tier collector is implemented.
         """
-        # v1 placeholder — mooncake tier collector is not yet implemented.
-        # Return None (not 0.0) so the slow-path caller can distinguish
-        # "no data" from a real miss and warn appropriately.
-        return None
+        if tier.lower() != "cpu":
+            return None
+
+        kv_store = self._kv_store
+        if kv_store.block_size is None:
+            return None
+
+        prefix_hashes = get_prefix_hashes(prompt_ids, kv_store.block_size)
+        if not prefix_hashes:
+            return 0.0
+
+        matched = 0
+        for prefix_hash in prefix_hashes:
+            cached_replicas = kv_store.get_replicas(str(prefix_hash), tier="cpu")
+            if cached_replicas is None or node_id not in cached_replicas:
+                break
+            matched += 1
+
+        return matched / len(prefix_hashes)
 
     def stop(self) -> None:
         """Stop all collectors and clean up."""
