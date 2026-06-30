@@ -13,6 +13,7 @@ from uni_agent.llm_router.collectors.transport.base import Transport
 from uni_agent.llm_router.collectors.decoder.base import Decoder
 from uni_agent.llm_router.config.collector import CollectorConfig
 from uni_agent.llm_router.store.data_store import DataStore
+from uni_agent.llm_router.collectors.updates import KVCacheUpdate, MetricsUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +41,15 @@ class Collector:
         Start the collector — launch event-loop thread and subscribe.
         """
         def handler(raw_data: bytes | str, node_id: str) -> None:
-            """Handler: decode and apply via DataStore."""
+            """Handler: decode and dispatch to the right store write path."""
             result = self._decoder.decode(raw_data, node_id)
-            if result is not None:
-                self._data_store.apply(result)
-            else:
+            if result is None:
                 logger.warning("the return of decoder.decode is None.")
+                return
+            if isinstance(result, KVCacheUpdate):
+                self._write_kv_update(result)
+            elif isinstance(result, MetricsUpdate):
+                self._write_metrics_update(result)
 
         self._loop_thread = threading.Thread(
             target=self._loop.run_forever,
@@ -57,6 +61,21 @@ class Collector:
             self._transport.subscribe(handler),
             self._loop,
         )
+
+    def _write_kv_update(self, update: KVCacheUpdate) -> None:
+        """Write KVCacheUpdate via DataStore."""
+        if update.block_size is not None:
+            self._data_store.set_block_size(update.block_size)
+        if update.clear_all:
+            self._data_store.clear_kv_node(update.node_id)
+        if update.remove_blocks:
+            self._data_store.remove_kv_blocks(update.node_id, update.remove_blocks)
+        if update.add_blocks:
+            self._data_store.add_kv_blocks(update.node_id, update.add_blocks)
+
+    def _write_metrics_update(self, update: MetricsUpdate) -> None:
+        """Write MetricsUpdate via DataStore."""
+        self._data_store.refresh_metrics({update.node_id: update.metrics})
 
     def stop(self) -> None:
         """

@@ -7,7 +7,6 @@ from typing import Any
 
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.store.metrics_store import MetricsStore
-from uni_agent.llm_router.store.updates import KVCacheUpdate, MetricsUpdate
 
 
 class DataStore:
@@ -29,36 +28,6 @@ class DataStore:
     def __init__(self) -> None:
         self._metrics = MetricsStore.singleton()
         self._kv = KVCacheStore.singleton()
-
-    # ── Update application (decoder → store) ────────────────────────────
-
-    def apply(self, update: KVCacheUpdate | MetricsUpdate) -> None:
-        """Apply a structured update produced by a Decoder.
-
-        Args:
-            update: A ``KVCacheUpdate`` or ``MetricsUpdate`` from a Decoder.
-        """
-        if isinstance(update, KVCacheUpdate):
-            self._apply_kv_update(update)
-        elif isinstance(update, MetricsUpdate):
-            self._apply_metrics_update(update)
-        else:
-            raise ValueError(f"DataStore not support {update} type.")
-
-    def _apply_kv_update(self, update: KVCacheUpdate) -> None:
-        """Apply KVCacheUpdate — block_size learning + clear/remove/add."""
-        if update.block_size is not None:
-            self.set_block_size(update.block_size)
-        if update.clear_all:
-            self.clear_kv_node(update.node_id)
-        if update.remove_blocks:
-            self.remove_kv_blocks(update.node_id, update.remove_blocks)
-        if update.add_blocks:
-            self.add_kv_blocks(update.node_id, update.add_blocks)
-
-    def _apply_metrics_update(self, update: MetricsUpdate) -> None:
-        """Apply MetricsUpdate — refresh metrics for the node."""
-        self.refresh_metrics({update.node_id: update.metrics})
 
     # ── MetricsStore operations ─────────────────────────────────────────
 
