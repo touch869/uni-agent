@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
-from uni_agent.llm_router.store.updates import MetricsUpdate
+from uni_agent.llm_router.collectors.updates import MetricsUpdate
 from uni_agent.llm_router.metric_spec import METRIC_SPECS, MetricKey
 
 logger = logging.getLogger(__name__)
