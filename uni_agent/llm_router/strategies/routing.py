@@ -27,7 +27,7 @@ class RoutingStrategy(Protocol):
     def score(
         self,
         prompt_ids: list[int] | None,
-        provider: Any,
+        store: Any,
         replicas: list[Any],
         request_id: str | None = None,
         sticky_table: Any = None,
@@ -51,7 +51,7 @@ def _rank_key(score: float) -> float:
 def route(
     strategies: list[tuple[Any, float]],
     prompt_ids: list[int] | None,
-    provider: Any,
+    store: Any,
     replicas: list[Any],
     request_id: str | None = None,
     sticky_table: Any = None,
@@ -86,7 +86,7 @@ def route(
         name = type(strategy).__name__
         try:
             scores = strategy.score(
-                prompt_ids, provider, replicas, request_id, sticky_table,
+                prompt_ids, store, replicas, request_id, sticky_table,
             )
             if len(scores) != n:
                 raise ValueError(f"{name}.score() returned {len(scores)} scores, expected {n}")

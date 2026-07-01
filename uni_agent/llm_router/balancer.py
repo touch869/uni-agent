@@ -29,6 +29,7 @@ from uni_agent.llm_router.strategies import (
     StickySessionTable,
     route,
 )
+from uni_agent.llm_router.store import DataStore
 
 logger = get_router_logger("balancer")
 
@@ -52,6 +53,7 @@ class KVCAwareBalancer:
         # short-circuit to a bound, non-overloaded replica.
         self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
         self._init_provider()
+        self._store = DataStore()
 
     def _init_provider(self) -> None:
         """Resolve per-server endpoints from Ray actor handles and init the provider.
@@ -134,7 +136,7 @@ class KVCAwareBalancer:
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
         ranking = route(
-            self._strategies, prompt_ids, self._provider, replicas,
+            self._strategies, prompt_ids, self._store, replicas,
             request_id, self._sticky,
         )
         if not ranking:
