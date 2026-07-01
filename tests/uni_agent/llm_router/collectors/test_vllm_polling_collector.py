@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from conftest import NODE_ID
 from uni_agent.llm_router.collectors.collector import get_collector
 from uni_agent.llm_router.config.collector import CollectorConfig
@@ -33,6 +35,8 @@ def _make_collector():
     )
 
 
+@pytest.mark.st
+@pytest.mark.gpu
 class TestVLLMMetricsCollectorWithRealService:
     """Integration tests: vLLM HTTP metrics collector against a live vLLM server."""
 
