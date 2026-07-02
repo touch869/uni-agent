@@ -226,8 +226,9 @@ def _convert_token_ids(raw_ids: list[int], block_size: int) -> list[bytes]:
         List of bytes objects, one per full block.
 
     Raises:
-        ValueError: If ``block_size <= 0`` or ``len(raw_ids)`` is not
-            divisible by ``block_size``.
+        ValueError: If ``block_size <= 0``, ``len(raw_ids)`` is not
+            divisible by ``block_size``, or any token ID is out of the
+            uint32 range (``[0, 2**32)``).
     """
     if block_size <= 0:
         raise ValueError(f"block_size must be > 0, got {block_size}")
@@ -235,8 +236,11 @@ def _convert_token_ids(raw_ids: list[int], block_size: int) -> list[bytes]:
         raise ValueError(f"token_ids len={len(raw_ids)} not divisible by block_size={block_size}")
     num_blocks = len(raw_ids) // block_size
     result: list[bytes] = []
-    for i in range(num_blocks):
-        start = i * block_size
-        end = start + block_size
-        result.append(struct.pack(f">{block_size}I", *raw_ids[start:end]))
+    try:
+        for i in range(num_blocks):
+            start = i * block_size
+            end = start + block_size
+            result.append(struct.pack(f">{block_size}I", *raw_ids[start:end]))
+    except struct.error as e:
+        raise ValueError(f"Invalid token ID value for struct packing: {e}") from e
     return result

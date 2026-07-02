@@ -55,8 +55,13 @@ class Collector:
         subscribe loop on it, passing the Decoder's decode method
         as the handler.  Synchronous — no ``await`` needed.
         """
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_forever()
+
         self._loop_thread = threading.Thread(
-            target=self._loop.run_forever,
+            target=run_loop,
             daemon=True,
         )
         self._loop_thread.start()
