@@ -14,12 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
-# Import RouteDataProvider from its definition module (collectors.provider),
-# not the ``collectors`` package attribute. Unit tests in test_balancer.py
-# monkeypatch ``collectors.RouteDataProvider`` to a fake; if we imported via the
-# package, Ray worker processes that fork from the patched pytest process would
-# bind the fake and report "_FakeProvider" in get_status(). Sourcing the class
-# from its definition site is immune to that package-attribute patch.
+import ray
+
 from uni_agent.llm_router.collectors.provider import RouteDataProvider
 from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.logging import get_router_logger
@@ -43,14 +39,25 @@ class KVCAwareBalancer:
         self._strategies: list[tuple[Any, float]] = [
             (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight) for cfg in self._config.strategies
         ]
+        max_num_seqs = self._resolve_max_num_seqs(servers)
+        for strategy, _ in self._strategies:
+            if hasattr(strategy, "set_capacity"):
+                strategy.set_capacity(max_num_seqs)
+        logger.info(f"KVCAwareBalancer: injected max_num_seqs={max_num_seqs} from server handle")
         self._servers: dict[str, Any] = dict(servers)
         self._route_calls = 0
-        # Sticky-session LRU table: request_id → replica_id. Owned by the
-        # Balancer (single Ray actor, serial acquire_server → no locking
-        # needed) and threaded into route()→strategy.score() so a strategy can
-        # short-circuit to a bound, non-overloaded replica.
         self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
         self._init_provider()
+
+    @staticmethod
+    def _resolve_max_num_seqs(servers: dict[str, Any]) -> int:
+        """Fetch ``max_num_seqs`` from a server handle's rollout config."""
+        handle = next(iter(servers.values()))
+        cfg = ray.get(handle.get_rollout_config.remote())
+        value = int(getattr(cfg, "max_num_seqs", 0))
+        if value <= 0:
+            raise ValueError(f"server handle returned invalid max_num_seqs={value}")
+        return value
 
     def _init_provider(self) -> None:
         """Resolve per-server endpoints from Ray actor handles and init the provider.

@@ -36,8 +36,8 @@ pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 def _strat(**kwargs) -> KVCacheAwareStrategy:
     """Build a KVCacheAwareStrategy with required boilerplate fields filled in.
 
-    ``max_num_seqs=64`` is pinned so the load formula's running term is
-    deterministic regardless of the ``MAX_NUM_SEQS`` env var.
+    Calls ``set_capacity(64)`` so the load formula's running/waiting terms
+    are deterministic — mimics what the Balancer does after construction.
     """
     defaults = dict(
         alpha=0.7,
@@ -45,12 +45,12 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
         collector_names=["vllm_zmq"],
         weight=1.0,
-        load_fn="normalized",
         load_weights=(0.4, 0.3, 0.3),
-        max_num_seqs=64,
     )
     defaults.update(kwargs)
-    return KVCacheAwareStrategy(**defaults)
+    strat = KVCacheAwareStrategy(**defaults)
+    strat.set_capacity(64)
+    return strat
 
 
 def _replicas(*ids: str) -> list[ReplicaInfo]:
@@ -520,14 +520,13 @@ class TestKVCAwareConstruction:
             {"alpha": -0.1},
             {"load_threshold": 0},
             {"load_threshold": 1.0},
-            {"layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": -0.1}},  # negative weight
-            {"layer_weights": {"nvme": 1.0}},  # illegal key
-            {"layer_weights": {"gpu": 1.0, "cpu": 0.2, "ssd": 0.1}},  # sum 1.3 != 1
-            {"layer_weights": {"gpu": 0.7, "cpu": 0.3}},  # missing ssd
-            {"load_fn": "does-not-exist"},  # unknown load fn
-            {"load_weights": (0.5, 0.3)},  # len != 3
-            {"load_weights": (0.5, 0.5, 0.5)},  # sum 1.5 != 1
-            {"load_weights": (-0.1, 0.6, 0.5)},  # negative
+            {"layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": -0.1}},
+            {"layer_weights": {"nvme": 1.0}},
+            {"layer_weights": {"gpu": 1.0, "cpu": 0.2, "ssd": 0.1}},
+            {"layer_weights": {"gpu": 0.7, "cpu": 0.3}},
+            {"load_weights": (0.5, 0.3)},
+            {"load_weights": (0.5, 0.5, 0.5)},
+            {"load_weights": (-0.1, 0.6, 0.5)},
         ],
     )
     def test_invalid_construction_raises(self, kwargs):
@@ -540,26 +539,49 @@ class TestKVCAwareConstruction:
             _strat(**kwargs)
 
     def test_valid_three_key_weights_accepted(self):
-        """
-        Feature: three-key layer_weights summing to 1.0 construct successfully
-        """
         strat = _strat(layer_weights={"gpu": 0.5, "cpu": 0.3, "ssd": 0.2})
         assert strat.layer_weights == {"gpu": 0.5, "cpu": 0.3, "ssd": 0.2}
 
-    def test_default_load_fn_is_normalized(self):
-        """
-        Feature: default load_fn is "normalized"; load_weights default (0.4,0.3,0.3)
-        """
-        strat = _strat()
-        assert strat.load_fn == "normalized"
-        assert strat.load_weights == (0.4, 0.3, 0.3)
 
-    def test_load_fn_kv_over_pressure_selectable(self):
-        """
-        Feature: load_fn="kv_over_pressure" (legacy) is selectable
-        """
-        strat = _strat(load_fn="kv_over_pressure")
-        assert strat.load_fn == "kv_over_pressure"
+# --------------------------------------------------------------------------- #
+# set_capacity
+# --------------------------------------------------------------------------- #
+class TestSetCapacity:
+    def test_set_capacity_updates_max_num_seqs(self):
+        strat = KVCacheAwareStrategy(
+            alpha=0.7, load_threshold=0.9,
+            layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
+            collector_names=["vllm_zmq"], weight=1.0,
+        )
+        strat.set_capacity(16)
+        assert strat._max_num_seqs == 16
+
+    def test_set_capacity_rejects_zero(self):
+        strat = KVCacheAwareStrategy(
+            alpha=0.7, load_threshold=0.9,
+            layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
+            collector_names=["vllm_zmq"], weight=1.0,
+        )
+        with pytest.raises(StrategyError):
+            strat.set_capacity(0)
+
+    def test_set_capacity_rejects_negative(self):
+        strat = KVCacheAwareStrategy(
+            alpha=0.7, load_threshold=0.9,
+            layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
+            collector_names=["vllm_zmq"], weight=1.0,
+        )
+        with pytest.raises(StrategyError):
+            strat.set_capacity(-1)
+
+    def test_compute_load_raises_before_set_capacity(self):
+        strat = KVCacheAwareStrategy(
+            alpha=0.7, load_threshold=0.9,
+            layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
+            collector_names=["vllm_zmq"], weight=1.0,
+        )
+        with pytest.raises(StrategyError, match="set_capacity"):
+            strat._compute_load(0.5, 0, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -634,12 +656,6 @@ class TestStrategyContract:
 
 class TestFromConfig:
     def test_from_config_correct_fields(self):
-        """
-        Feature: from_config() transfers config fields to the strategy instance
-        Description: build a KVCAwareStrategyConfig with non-default values, then from_config()
-        Expectation: strategy alpha, load_threshold, layer_weights match the config;
-                     load_fn/weights come from code defaults (not config)
-        """
         from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 
         cfg = KVCAwareStrategyConfig(
@@ -653,18 +669,12 @@ class TestFromConfig:
         assert strat.alpha == pytest.approx(0.6)
         assert strat.load_threshold == pytest.approx(0.85)
         assert strat.layer_weights == {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
-        assert strat.load_fn == "normalized"  # code default
-        assert strat.load_weights == (0.4, 0.3, 0.3)  # code default
+        assert strat._max_num_seqs is None  # not set until set_capacity()
+        assert strat.load_weights == (0.4, 0.3, 0.3)
 
-    def test_from_config_scores_match_direct(self, monkeypatch):
-        """
-        Feature: a strategy built via from_config() produces the same scores as one built directly
-        Description: pin MAX_NUM_SEQS=64 so both resolve the same max_num_seqs
-        Expectation: both strategies return approx-equal score lists
-        """
+    def test_from_config_scores_match_direct(self):
         from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 
-        monkeypatch.setenv("MAX_NUM_SEQS", "64")  # from_config resolves max_num_seqs from env
         cfg = KVCAwareStrategyConfig(
             alpha=0.7,
             load_threshold=0.9,
@@ -673,7 +683,8 @@ class TestFromConfig:
             collector_names=["vllm_zmq"],
         )
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
-        strat_direct = _strat()  # max_num_seqs=64 pinned
+        strat_from_cfg.set_capacity(64)
+        strat_direct = _strat()
         provider = FakeRouteDataProvider(
             {
                 "rep_a": {

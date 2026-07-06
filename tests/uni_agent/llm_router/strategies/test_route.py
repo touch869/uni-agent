@@ -167,12 +167,12 @@ def _strat(**kwargs):
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
         collector_names=["vllm_zmq"],
         weight=1.0,
-        load_fn="normalized",
         load_weights=(0.4, 0.3, 0.3),
-        max_num_seqs=64,
     )
     defaults.update(kwargs)
-    return KVCacheAwareStrategy(**defaults)
+    strat = KVCacheAwareStrategy(**defaults)
+    strat.set_capacity(64)
+    return strat
 
 
 # --------------------------------------------------------------------------- #
