@@ -6,6 +6,8 @@ KVCacheStore via dispatch table.
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 import msgpack
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
@@ -15,6 +17,11 @@ from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 
 logger = get_router_logger("vllm-kv")
+
+# Log a kv-events tally (events + blocks by type) every N applied events.
+# Lets us see BlockStored/BlockRemoved flow — esp. whether mc-off groups (no
+# mooncake → no kv-events emission) get any events at all.
+_KV_EVENT_LOG_EVERY = 500
 
 
 class VLLMKVDecoder(Decoder):
@@ -41,6 +48,10 @@ class VLLMKVDecoder(Decoder):
     def __init__(self) -> None:
         self._store = self.store_cls.default()
         self.remote_to_local_block_hash: dict[str, str] = {}
+        # kv-event tallies for periodic summary logging.
+        self._event_counts: dict[str, int] = defaultdict(int)
+        self._block_counts: dict[str, int] = defaultdict(int)
+        self._last_logged_total = 0
 
     def decode(self, raw_data: bytes | str, node_id: str) -> None:
         """Decode msgpack payload, apply events to store.
@@ -74,7 +85,21 @@ class VLLMKVDecoder(Decoder):
             return
         handler = getattr(self, handler_name)
         replica_id = event.replica_id or default_replica_id or ""
+        n_blocks = len(getattr(event, "block_hashes", []) or [])
+        logger.debug(f"kv-event type={event.event_type} replica={replica_id} n_blocks={n_blocks}")
         handler(event, replica_id)
+
+        # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
+        self._event_counts[event.event_type] += 1
+        self._block_counts[event.event_type] += n_blocks
+        total = sum(self._event_counts.values())
+        if total - self._last_logged_total >= _KV_EVENT_LOG_EVERY:
+            self._last_logged_total = total
+            retained = self._store.per_replica_block_counts()
+            logger.info(
+                f"kv-events tally: events={dict(self._event_counts)} blocks={dict(self._block_counts)} "
+                f"(total_events={total}) | retained_blocks/replica={retained}"
+            )
 
     # ── Event handlers ──────────────────────────────────────────────────
 

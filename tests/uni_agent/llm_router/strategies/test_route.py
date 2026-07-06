@@ -134,6 +134,9 @@ class FakeRouteDataProvider:
     def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
         return 0.0
 
+    def get_retained_occupancy(self, replica_id):
+        return None
+
 
 class ConstantStrategy:
     def __init__(self, scores):

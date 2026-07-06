@@ -107,6 +107,11 @@ class FakeRouteDataProvider:
     def get_tier_prefix_hit_rate(self, replica_id: str, prompt_ids: list[int], tier: str) -> float:
         return self._data.get(replica_id, {}).get("tiers", {}).get(tier, 0.0)
 
+    def get_retained_occupancy(self, replica_id: str) -> float | None:
+        # No retained-block data in unit tests → strategy falls back to
+        # kv_cache_usage_perc (the value unit-test expectations are built on).
+        return None
+
 
 class ConstantStrategy:
     """Returns a fixed per-replica score list (for route() composition tests)."""
@@ -391,6 +396,47 @@ class TestKVCAwareLoad:
         provider = FakeRouteDataProvider({})
         scores = strat.score(PROMPT_IDS, provider, _replicas("ghost"))
         assert scores == pytest.approx([0.18])
+
+
+# --------------------------------------------------------------------------- #
+# _resolve_kv_usage: retained occupancy preferred over kv_cache_usage_perc
+# --------------------------------------------------------------------------- #
+class TestRetainedLoad:
+    def test_retained_preferred_over_kv_cache_usage_perc(self):
+        """
+        Feature: _resolve_kv_usage uses retained occupancy when available
+        Description: kv_cache_usage_perc=0.9 but retained=0.1
+        Expectation: load uses retained (0.1): load=0.4·0.1=0.04, s_load=0.96,
+                     s_cache=0 → score=0.3·0.96=0.288 (not 0.192 from kv=0.9)
+        """
+
+        class _RetainedProvider(FakeRouteDataProvider):
+            def __init__(self, data, retained):
+                super().__init__(data)
+                self._retained = retained
+
+            def get_retained_occupancy(self, replica_id):
+                return self._retained.get(replica_id)
+
+        strat = _strat()
+        provider = _RetainedProvider(
+            {"rep": {"kv_cache_usage_perc": 0.9, "num_requests_running": 0, "num_requests_waiting": 0}},
+            {"rep": 0.1},
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep"))
+        assert scores == pytest.approx([0.288])
+
+    def test_falls_back_to_kv_cache_usage_perc_when_retained_none(self):
+        """
+        Feature: retained None → fallback to kv_cache_usage_perc
+        Expectation: load=0.4·0.5=0.2, s_load=0.8, s_cache=0 → score=0.3·0.8=0.24
+        """
+        strat = _strat()
+        provider = FakeRouteDataProvider(
+            {"rep": {"kv_cache_usage_perc": 0.5, "num_requests_running": 0, "num_requests_waiting": 0}}
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep"))
+        assert scores == pytest.approx([0.24])
 
 
 # --------------------------------------------------------------------------- #

@@ -17,6 +17,7 @@ from typing import Any
 
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 from uni_agent.llm_router.logging import get_router_logger
+from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.store.metrics_store import MetricsStore
 
@@ -142,3 +143,20 @@ class RouteDataProvider:
         caller can distinguish "no data" from a genuine 0% hit and warn.
         """
         return KVCacheStore.default().get_tier_prefix_hit_rate(node_id, prompt_ids, tier) or None
+
+    def get_retained_occupancy(self, node_id: str) -> float | None:
+        """Retained-cache occupancy = ``retained_blocks / num_gpu_blocks`` (∈ [0,1]).
+
+        Unlike ``kv_cache_usage_perc`` (running-only), this rises as distinct
+        prefixes accumulate in the free pool and signals impending LRU
+        eviction. Returns ``None`` when retained blocks or ``num_gpu_blocks``
+        is unavailable (e.g. mc-off groups emit no kv-events), so the caller
+        falls back to ``kv_cache_usage_perc``.
+        """
+        retained = KVCacheStore.default().per_replica_block_counts().get(node_id, 0)
+        if retained <= 0:
+            return None
+        total = MetricsStore.default().get(node_id, MetricKey.NUM_GPU_BLOCKS)
+        if not total or total <= 0:
+            return None
+        return min(1.0, retained / float(total))

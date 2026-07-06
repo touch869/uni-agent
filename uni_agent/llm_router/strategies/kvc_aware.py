@@ -90,10 +90,23 @@ class KVCacheAwareStrategy:
             raise StrategyError("set_capacity() must be called before routing")
         return load_normalized(kv_usage, running, waiting, max_num_seqs=self._max_num_seqs, weights=self.load_weights)
 
+    def _resolve_kv_usage(self, provider: RouteDataProvider, replica_id: str, m: dict) -> float:
+        """KV-cache occupancy for the load formula.
+
+        Prefers **retained occupancy** (``retained_blocks / num_gpu_blocks``),
+        which reflects free-pool blocks hash-marked for reuse and rises as
+        distinct prefixes accumulate; falls back to ``kv_cache_usage_perc``
+        (running-only) when retained data is unavailable.
+        """
+        retained_occ = provider.get_retained_occupancy(replica_id)
+        if retained_occ is not None:
+            return retained_occ
+        return m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
+
     def is_overloaded(self, provider: RouteDataProvider, replica: ReplicaInfo) -> bool:
         """Return True if ``replica`` is overloaded (``load > load_threshold``)."""
         m = provider.get_metrics(replica.replica_id)
-        kv_usage = m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
+        kv_usage = self._resolve_kv_usage(provider, replica.replica_id, m)
         running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
         waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
         return self._compute_load(kv_usage, running, waiting) > self.load_threshold
@@ -107,7 +120,7 @@ class KVCacheAwareStrategy:
         for idx, replica in enumerate(replicas):
             if replica.replica_id == sticky_id:
                 m = provider.get_metrics(replica.replica_id)
-                kv_usage = m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
+                kv_usage = self._resolve_kv_usage(provider, replica.replica_id, m)
                 running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
                 waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
                 load = self._compute_load(kv_usage, running, waiting)
@@ -138,7 +151,7 @@ class KVCacheAwareStrategy:
         result = []
         for replica in replicas:
             m = provider.get_metrics(replica.replica_id)
-            kv_usage = m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
+            kv_usage = self._resolve_kv_usage(provider, replica.replica_id, m)
             running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
             waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
             load = self._compute_load(kv_usage, running, waiting)

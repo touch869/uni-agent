@@ -17,6 +17,16 @@ from uni_agent.llm_router.store.metrics_store import MetricsStore
 logger = get_router_logger("vllm-metrics")
 
 
+def _extract_label(labels_str: str, key: str) -> str | None:
+    """Extract a label value from a Prometheus ``k="v",k2="v2"`` labels string."""
+    for kv in labels_str.split(","):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            if k.strip() == key:
+                return v.strip().strip('"')
+    return None
+
+
 class VLLMMetricsDecoder(Decoder):
     """vLLM Prometheus metrics decoder — parses HTTP response text
     and writes results to MetricsStore.
@@ -54,10 +64,30 @@ class VLLMMetricsDecoder(Decoder):
         for line in raw_data.splitlines():
             if line.startswith("#") or not line.strip():
                 continue
+            # Parse ``name{labels} value`` — labels needed for cache_config_info.
             try:
-                raw_name = line.split("{")[0] if "{" in line else line.split()[0]
-                value = float(line.split()[-1])
+                if "{" in line:
+                    name_part, rest = line.split("{", 1)
+                    labels_str, _, value_part = rest.partition("}")
+                    raw_name = name_part.strip()
+                else:
+                    raw_name = line.split()[0]
+                    labels_str, value_part = "", line.split()[-1]
             except (ValueError, IndexError):
+                continue
+            # cache_config_info is an info gauge: its value is 1.0, the real
+            # data lives in the ``num_gpu_blocks`` label.
+            if raw_name == "vllm:cache_config_info":
+                n = _extract_label(labels_str, "num_gpu_blocks")
+                if n is not None:
+                    try:
+                        result[MetricKey.NUM_GPU_BLOCKS] = int(float(n))
+                    except ValueError:
+                        pass
+                continue
+            try:
+                value = float(value_part)
+            except ValueError:
                 continue
             canonical = self._PROMETHEUS_MAP.get(raw_name)
             if canonical:
