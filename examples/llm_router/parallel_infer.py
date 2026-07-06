@@ -77,25 +77,38 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.data.max_prompt_length = args.prompt_length
     config.data.max_response_length = args.response_length
 
-    # Optionally attach MooncakeStoreConnector for cross-replica KV sharing.
+    # Engine kwargs: MooncakeStoreConnector (L2 KV) and/or standalone kv-events.
+    vllm_kwargs: dict = {}
     if args.enable_mooncake:
-        config.actor_rollout_ref.rollout.engine_kwargs = {
-            "vllm": {
-                "kv_transfer_config": {
-                    "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_both",
-                    "kv_connector_extra_config": {
-                        "mooncake_config_path": args.mooncake_config_path,
-                    },
-                }
-            }
+        # MooncakeStoreConnector for cross-replica KV sharing.
+        # Config via MOONCAKE_CONFIG_PATH env, not extra_config.
+        vllm_kwargs["kv_transfer_config"] = {
+            "kv_connector": "MooncakeStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {},
         }
+    if args.router_config_path:
+        # vLLM kv-events (zmq publisher). Endpoint ports are placeholders (verl assigns).
+        vllm_kwargs["kv-events-config"] = {
+            "enable_kv_cache_events": True,
+            "publisher": "zmq",
+            "topic": "kv-events",
+            "endpoint": "tcp://*:0",
+            "replay_endpoint": "tcp://*:0",
+        }
+    if vllm_kwargs:
+        config.actor_rollout_ref.rollout.engine_kwargs = {"vllm": vllm_kwargs}
 
     return config
 
 
 def run_inference(args: argparse.Namespace):
     """Run the inference pipeline using the provided arguments."""
+    # vLLM's mooncake connector reads MOONCAKE_CONFIG_PATH (not extra_config).
+    # Set before ray.init so Ray-spawned workers inherit it.
+    if args.enable_mooncake and args.mooncake_config_path:
+        os.environ["MOONCAKE_CONFIG_PATH"] = os.path.expanduser(args.mooncake_config_path)
+
     # 1. Init Ray — disable idle-worker reaper so agent workers survive
     # dispatch gaps (default ~10 s threshold would kill them prematurely).
     ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
@@ -112,7 +125,11 @@ def run_inference(args: argparse.Namespace):
     # 3. Load dataset
     data_path = os.path.expanduser(args.data_path)
     logger.info(f"Loading dataset from: {data_path}")
-    samples = load_dataset("parquet", data_files=data_path, split="train").to_list()
+    dataset = load_dataset("parquet", data_files=data_path, split="train")
+    if args.shuffle:
+        logger.info("Shuffling dataset (seed=%d) before sampling", args.seed)
+        dataset = dataset.shuffle(seed=args.seed)
+    samples = dataset.to_list()
 
     # Limit number of samples (-1 = no limit)
     if args.max_samples > 0:
@@ -218,6 +235,12 @@ def main():
         default=-1,
         help="Max number of samples to run. Use -1 for no limit (full dataset).",
     )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle the dataset before slicing (--max-samples / --n). Aligns with fully_async data.shuffle.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for --shuffle.")
 
     # Execution / Engine configs
     parser.add_argument(
