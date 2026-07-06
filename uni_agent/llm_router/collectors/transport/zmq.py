@@ -7,7 +7,6 @@ live events, and delivers raw payloads to the handler callback.
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
 from typing import Callable
 
@@ -15,8 +14,9 @@ import zmq
 import zmq.asyncio
 
 from uni_agent.llm_router.collectors.transport.base import Transport
+from uni_agent.llm_router.logging import get_router_logger
 
-logger = logging.getLogger(__name__)
+logger = get_router_logger("zmq-transport")
 
 
 @dataclass
@@ -104,7 +104,7 @@ class ZMQTransport(Transport):
                     )
                     done_future.result(timeout=10)
             except (asyncio.CancelledError, Exception) as exc:
-                logger.debug("Error waiting for ZMQ sub task to finish: %s", exc)
+                logger.debug(f"Error waiting for ZMQ sub task to finish: {exc}")
         self._sub_tasks.clear()
         self._close_all_zmq_sockets()
 
@@ -144,7 +144,7 @@ class ZMQTransport(Transport):
             return True
 
         except zmq.ZMQError as exc:
-            logger.warning("ZMQ connection error for node %s: %s", node_id, exc)
+            logger.warning(f"ZMQ connection error for node {node_id}: {exc}")
             self._close_zmq_sockets_for(node_id)
             return False
 
@@ -251,4 +251,4 @@ class ZMQTransport(Transport):
                         handler(line, node_id)
 
         except zmq.ZMQError as exc:
-            logger.warning("ZMQ replay error for node %s: %s", node_id, exc)
+            logger.warning(f"ZMQ replay error for node {node_id}: {exc}")

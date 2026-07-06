@@ -10,10 +10,11 @@ import logging
 from typing import Any
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.metric_spec import METRIC_SPECS, MetricKey
 from uni_agent.llm_router.store.metrics_store import MetricsStore
 
-logger = logging.getLogger(__name__)
+logger = get_router_logger("vllm-metrics")
 
 
 class VLLMMetricsDecoder(Decoder):

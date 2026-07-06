@@ -6,16 +6,15 @@ KVCacheStore via dispatch table.
 
 from __future__ import annotations
 
-import logging
-
 import msgpack
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
 from uni_agent.llm_router.collectors.decoder.vllm.kv_event import KVCacheEvent
 from uni_agent.llm_router.hash import compute_hash
+from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 
-logger = logging.getLogger(__name__)
+logger = get_router_logger("vllm-kv")
 
 
 class VLLMKVDecoder(Decoder):
@@ -61,11 +60,7 @@ class VLLMKVDecoder(Decoder):
             for event in events:
                 self._apply_event(event, default_replica_id=node_id)
         except (msgpack.UnpackException, ValueError, TypeError) as exc:
-            logger.warning(
-                "Failed to decode msgpack payload from node %s: %s",
-                node_id,
-                exc,
-            )
+            logger.warning(f"Failed to decode msgpack payload from node {node_id}: {exc}")
 
     def _apply_event(
         self,
@@ -75,7 +70,7 @@ class VLLMKVDecoder(Decoder):
         """Dispatch a KVCacheEvent to the appropriate handler."""
         handler_name = self._DISPATCH.get(event.event_type)
         if handler_name is None:
-            logger.debug("Unhandled event type: %s", event.event_type)
+            logger.debug(f"Unhandled event type: {event.event_type}")
             return
         handler = getattr(self, handler_name)
         replica_id = event.replica_id or default_replica_id or ""
