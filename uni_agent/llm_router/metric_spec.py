@@ -26,6 +26,26 @@ class MetricKey:
     # number lives in the label). Used to turn retained-block counts into an
     # occupancy ratio that, unlike kv_cache_usage_perc, reflects the free pool.
     NUM_GPU_BLOCKS: str = "num_gpu_blocks"
+    PREFIX_CACHE_QUERIES: str = "prefix_cache_queries"
+    PREFIX_CACHE_HITS: str = "prefix_cache_hits"
+    # ── Evidence metrics — cumulative counters/histograms polled from vLLM
+    # /metrics. Use delta between snapshots for rates.
+    TTFT_SECONDS_SUM: str = "ttft_seconds_sum"
+    TTFT_COUNT: str = "ttft_count"
+    # Queue time (TTFT includes queue wait; prefill_time = TTFT - queue is what
+    # prefix-sharing actually reduces). Histogram, like TTFT.
+    QUEUE_TIME_SECONDS_SUM: str = "queue_time_seconds_sum"
+    QUEUE_TIME_COUNT: str = "queue_time_count"
+    TPOT_SECONDS_SUM: str = "tpot_seconds_sum"
+    TPOT_COUNT: str = "tpot_count"
+    # Prefill tokens actually computed (cache MISS) — the "recompute length".
+    PROMPT_TOKENS: str = "prompt_tokens"
+    # Prompt tokens that hit cache — the "prefix hit length" in tokens.
+    PROMPT_TOKENS_CACHED: str = "prompt_tokens_cached"
+    # Decode tokens generated.
+    GENERATION_TOKENS: str = "generation_tokens"
+    # External (mc connector) prefix-cache hits — cross-replica KV reuse.
+    EXTERNAL_PREFIX_CACHE_HITS: str = "external_prefix_cache_hits"
 
 
 # ── Metric definitions (single source of truth) ──────────────────────
@@ -52,5 +72,66 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
         "default": 0,
         "value_type": int,
         "describe": "Per-replica total GPU KV blocks (cache_config_info num_gpu_blocks label)",
+    },
+    MetricKey.PREFIX_CACHE_QUERIES: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Prefix cache query count (vLLM counter; cumul. — use delta for rate)",
+    },
+    MetricKey.PREFIX_CACHE_HITS: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Prefix cache hit count (vLLM counter; cumul. — use delta for rate)",
+    },
+    # ── Evidence metrics — all cumulative; consume deltas for rates/averages. ──
+    MetricKey.TTFT_SECONDS_SUM: {
+        "default": 0.0,
+        "value_type": float,
+        "describe": "Cumul. sum of time-to-first-token seconds (histogram _sum)",
+    },
+    MetricKey.TTFT_COUNT: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. count of TTFT samples (histogram _count) = #prefills",
+    },
+    MetricKey.QUEUE_TIME_SECONDS_SUM: {
+        "default": 0.0,
+        "value_type": float,
+        "describe": "Cumul. sum of request queue-wait seconds (TTFT incl. queue; prefill=TTFT-queue)",
+    },
+    MetricKey.QUEUE_TIME_COUNT: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. count of queue-time samples (histogram _count)",
+    },
+    MetricKey.TPOT_SECONDS_SUM: {
+        "default": 0.0,
+        "value_type": float,
+        "describe": "Cumul. sum of time-per-output-token seconds (histogram _sum)",
+    },
+    MetricKey.TPOT_COUNT: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. count of TPOT samples (histogram _count)",
+    },
+    MetricKey.PROMPT_TOKENS: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. prefill tokens computed (cache miss) — recompute length",
+    },
+    MetricKey.PROMPT_TOKENS_CACHED: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. prompt tokens served from cache — prefix-hit length (tokens)",
+    },
+    MetricKey.GENERATION_TOKENS: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. decode tokens generated",
+    },
+    MetricKey.EXTERNAL_PREFIX_CACHE_HITS: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. external (mc connector) prefix-cache hits — cross-replica KV reuse",
     },
 }
