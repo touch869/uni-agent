@@ -1260,11 +1260,11 @@ class TestKVCAwareOther:
         strategy = result.strategies[0]
         assert isinstance(strategy, KVCAwareStrategyConfig)
         assert strategy.weight == 1.0
-        assert strategy.alpha == 0.7
-        assert strategy.load_threshold == 0.9
+        assert strategy.alpha == 0.3
+        assert strategy.load_threshold == 0.6
         assert strategy.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
         assert strategy.collector_names == ["vllm_zmq", "vllm_metrics"]
-        assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
+        assert result.collector.http_polling == {"polling_interval": 1.0, "http_timeout": 10.0}
         assert result.collector.long_connection == {
             "base_retry_delay": 1.0,
             "max_retry_delay": 30.0,
@@ -1432,9 +1432,9 @@ class TestDropInIntegration:
         s = result.strategies[0]
         assert isinstance(s, KVCAwareStrategyConfig)
         assert s.weight == 1.0
-        assert s.alpha == 0.7
+        assert s.alpha == 0.3
         assert s.collector_names == ["vllm_zmq", "vllm_metrics"]
-        assert result.collector.http_polling["polling_interval"] == 5.0
+        assert result.collector.http_polling["polling_interval"] == 1.0
         assert result.collector.long_connection["max_retry_attempts"] == 5
         assert result.cache_store.kv_cache_store_type == "list"
         assert result.cache_store.ttl == 30.0

@@ -2,7 +2,7 @@
 
 # HTTP polling connection parameters
 http_polling:
-    polling_interval: 5
+    polling_interval: 1
     http_timeout: 10
 
 # Long-connection (ZMQ subscription, etc.) parameters
