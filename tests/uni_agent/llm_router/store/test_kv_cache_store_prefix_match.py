@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from uni_agent.llm_router.hash import get_prefix_hashes
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
+from uni_agent.llm_router.utils.hash import get_prefix_hashes
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
@@ -116,7 +116,7 @@ def test_isolated_later_block_is_not_credited() -> None:
     prompt = list(range(1, 2 * 4 + 1))  # 8 tokens -> 4 blocks
 
     token_id = [11, 22, 33, 44]
-    token_hash1, token_hash2= _hashes(token_id)
+    token_hash1, token_hash2 = _hashes(token_id)
 
     store = _store_with_block_size()
     # Inject ONLY H3 for rep_a — synthetic, but emulates a lagged/OoO report.
