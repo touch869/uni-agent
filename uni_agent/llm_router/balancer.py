@@ -78,6 +78,9 @@ class KVCAwareBalancer:
         collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
         server_addresses: dict[str, str] = {}
         kv_event_endpoints: dict[str, list[str]] = {}
+        addr_futures = []
+        ep_futures = []
+        active_replicas = []
         for replica_id, handle in self._servers.items():
             if not hasattr(handle, "get_server_address"):
                 logger.warning(
@@ -85,10 +88,17 @@ class KVCAwareBalancer:
                     f"(type={type(handle).__name__}); skipping dynamic endpoint discovery",
                 )
                 continue
-            ip, port = ray.get(handle.get_server_address.remote())
-            server_addresses[replica_id] = f"{ip}:{port}"
-            endpoints = ray.get(handle.get_kv_events_endpoints.remote())
-            if endpoints is not None:
+            active_replicas.append(replica_id)
+            addr_futures.append(handle.get_server_address.remote())
+            ep_futures.append(handle.get_kv_events_endpoints.remote())
+
+        if active_replicas:
+            ips_ports = ray.get(addr_futures)
+            endpoints_list = ray.get(ep_futures)
+            for replica_id, (ip, port), endpoints in zip(active_replicas, ips_ports, endpoints_list, strict=False):
+                server_addresses[replica_id] = f"{ip}:{port}"
+                if endpoints is None:
+                    continue
                 kv_event_endpoints[replica_id] = endpoints
         self._provider = RouteDataProvider(
             self._config.collector,

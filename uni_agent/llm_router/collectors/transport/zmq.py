@@ -153,8 +153,8 @@ class ZMQTransport(Transport):
         sockets = self._replica_sockets.pop(node_id, None)
         if sockets is None:
             return
-        sockets.sub_socket.close()
-        sockets.replay_socket.close()
+        sockets.sub_socket.close(linger=0)
+        sockets.replay_socket.close(linger=0)
         sockets.context.term()
 
     def _close_all_zmq_sockets(self) -> None:

@@ -56,6 +56,9 @@ class HTTPTransport(Transport):
                 for nid, resp in zip(coros.keys(), responses, strict=False):
                     if isinstance(resp, Exception):
                         continue  # failed node — handler falls back to defaults
+                    if resp.status_code != 200:
+                        logger.warning("Failed to fetch metrics from %s: HTTP %s", nid, resp.status_code)
+                        continue
                     try:
                         handler(resp.text, nid)
                     except Exception as exc:
