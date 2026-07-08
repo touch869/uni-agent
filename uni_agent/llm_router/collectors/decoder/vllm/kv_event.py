@@ -9,6 +9,17 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _normalize_block_hash(block_hash: Any) -> str:
+    """Normalize vLLM event block hashes across payload representations.
+
+    Event publishers can encode the block hash as either an integer or its raw
+    bytes. Convert raw bytes to the same low-64-bit key representation.
+    """
+    if isinstance(block_hash, bytes | bytearray):
+        return str(int.from_bytes(block_hash, byteorder="big") & ((1 << 64) - 1))
+    return str(block_hash)
+
+
 @dataclass(frozen=True)
 class KVCacheEvent:
     """Standardized KV cache event — normalized from backend-specific ZMQ payloads.
@@ -23,6 +34,8 @@ class KVCacheEvent:
                    in BlockStored events).  Each element is one full block
                    encoded as uint32 big-endian (4 bytes per token).
         block_size: Block size (only present in BlockStored events).
+        medium: Raw cache medium provided by the backend, for example ``"GPU"``
+                or ``"CPU"``.
     """
 
     event_type: str
@@ -128,14 +141,14 @@ class KVCacheEvent:
         if len(fields) < 4:
             raise ValueError(f"BlockStored needs >= 4 fields, got {len(fields)}")
 
-        block_hashes = [str(bh) for bh in fields[0]]
-        parent_block_hash = str(fields[1]) if fields[1] is not None else None
+        block_hashes = [_normalize_block_hash(bh) for bh in fields[0]]
+        parent_block_hash = _normalize_block_hash(fields[1]) if fields[1] is not None else None
         raw_token_ids = list(fields[2]) if fields[2] is not None else None
         block_size = int(fields[3])
-        medium = cls._opt_str(fields, 5)  # vLLM medium: "GPU" / "cpu"
+        medium = cls._opt_str(fields, 5)  # Preserve the backend-provided medium.
 
         # Chop and encode token IDs into block-sized uint32 big-endian bytes
-        token_ids = _convert_token_ids(raw_token_ids, block_size) if raw_token_ids is not None else None
+        token_ids = _convert_token_ids(raw_token_ids, block_size) if raw_token_ids and block_size > 0 else None
 
         return cls(
             event_type="stored",
@@ -156,7 +169,7 @@ class KVCacheEvent:
             1: medium       — str or None
             2: group_idx    — int or None
         """
-        block_hashes = [str(bh) for bh in fields[0]]
+        block_hashes = [_normalize_block_hash(bh) for bh in fields[0]]
         medium = cls._opt_str(fields, 1)
 
         return cls(
@@ -179,6 +192,7 @@ class KVCacheEvent:
             parent_block_hash=None,
             token_ids=None,
             block_size=None,
+            medium=None,
         )
 
     # ── Tag resolution ───────────────────────────────────────────────────

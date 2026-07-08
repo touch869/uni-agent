@@ -124,12 +124,12 @@ class TestVLLMKVEventCollectorWithRealService:
 
     def test_decoder_hash_mapping_populated(self, vllm_kv_service):
         """
-        Feature: VLLMKVDecoder.remote_to_local_block_hash is populated after events
+        Feature: VLLMKVDecoder.vllm_to_local_block_hash is populated after events
         Description:
-            Verify that the decoder's hash mapping tracks remote→local block hashes,
+            Verify that the decoder maps vLLM block hashes to locally-computed hashes,
             and that every local hash appears in the KV cache store.
         Expectation:
-            remote_to_local_block_hash is non-empty.
+            vllm_to_local_block_hash is non-empty.
             All local hashes are present in the KV cache store.
         """
         store = DataStore()
@@ -141,9 +141,17 @@ class TestVLLMKVEventCollectorWithRealService:
         time.sleep(5.0)
         collector.stop()
 
-        mapping = collector._decoder.remote_to_local_block_hash
-        assert len(mapping) > 0, "remote_to_local_block_hash should have entries after processing events"
-        for remote_bh, local_bh in mapping.items():
-            assert isinstance(remote_bh, str)
-            assert isinstance(local_bh, str)
-            assert store.has_kv_block(local_bh), f"Local hash '{local_bh}' from mapping not found in KV cache store"
+        mapping = collector._decoder.vllm_to_local_block_hash
+        assert len(mapping) > 0, "vllm_to_local_block_hash should have entries after processing events"
+        for mapping_key, local_hash in mapping.items():
+            assert isinstance(mapping_key, tuple)
+            assert len(mapping_key) == 3
+            layer, node_id, vllm_block_hash = mapping_key
+            assert layer in {"gpu", "cpu"}
+            assert node_id == NODE_ID
+            assert isinstance(vllm_block_hash, str)
+            assert isinstance(local_hash, str)
+            if layer == "gpu":
+                assert store.has_kv_block(local_hash), (
+                    f"Local hash '{local_hash}' from mapping not found in KV cache store"
+                )
