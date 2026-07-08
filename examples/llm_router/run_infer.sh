@@ -16,6 +16,9 @@
 #
 #   # with MooncakeStoreConnector
 #   bash examples/llm_router/run_infer.sh /data/models/Qwen3-4B --enable-mooncake
+#
+#   # with kv-events zmq publisher (for KVCAware router / standalone collector)
+#   bash examples/llm_router/run_infer.sh /data/models/Qwen3-4B --kv-events
 
 set -euo pipefail
 

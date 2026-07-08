@@ -77,7 +77,7 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.data.max_prompt_length = args.prompt_length
     config.data.max_response_length = args.response_length
 
-    # Engine kwargs: MooncakeStoreConnector (L2 KV) and/or standalone kv-events.
+    # Engine kwargs: MooncakeStoreConnector (L2 KV) and/or kv-events zmq publisher.
     vllm_kwargs: dict = {}
     if args.enable_mooncake:
         # MooncakeStoreConnector for cross-replica KV sharing.
@@ -87,8 +87,10 @@ def init_config(args: argparse.Namespace) -> DictConfig:
             "kv_role": "kv_both",
             "kv_connector_extra_config": {},
         }
-    if args.router_config_path:
-        # vLLM kv-events (zmq publisher). Endpoint ports are placeholders (verl assigns).
+    if args.kv_events:
+        # vLLM kv-events (zmq publisher). Endpoint ports are placeholders
+        # (verl assigns ephemeral). Needed by: KVCAware router load signal
+        # (retained-cache occupancy), standalone collector metrics.
         vllm_kwargs["kv-events-config"] = {
             "enable_kv_cache_events": True,
             "publisher": "zmq",
@@ -278,6 +280,12 @@ def main():
         type=str,
         default="mooncake_config.json",
         help="Path to the mooncake config JSON (used with --enable-mooncake).",
+    )
+    parser.add_argument(
+        "--kv-events",
+        action="store_true",
+        help="Enable vLLM kv-events zmq publisher for retained-cache occupancy collection. "
+        "Required for KVCAware router load signal and standalone collector metrics.",
     )
 
     args = parser.parse_args()
