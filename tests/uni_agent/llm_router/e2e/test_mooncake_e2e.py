@@ -29,8 +29,12 @@ _AGENT_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "agent_con
 _MODEL = os.environ.get("VLLM_MODEL", "/data1/models/Qwen/Qwen3-4B-Instruct-2507")
 _DATASET = os.environ.get("SWEBENCH_DATASET", "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
 _ROUTER = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
-_MC_CONFIG = os.environ.get("MOONCAKE_CONFIG_PATH", "/data1/hgq/uni-agent/mooncake_config.json")
 _LOG_DIR = "/tmp/e2e_mooncake_logs"
+
+# Mooncake daemon ports — the test brings up its own metadata server + master
+# on these fixed ports so it does not depend on an externally-managed cluster.
+_MC_METADATA_PORT = 9527
+_MC_MASTER_PORT = 50051
 
 
 def _get_traj_dir() -> str:
@@ -41,9 +45,37 @@ def _get_traj_dir() -> str:
 
 
 def _run_infer_with_mooncake(timeout: int = 600) -> str:
-    """Run run_infer.sh with router + mooncake. Returns log content."""
+    """Run run_infer.sh with router + mooncake. Returns log content.
+
+    Brings up its own mooncake cluster (metadata server + master) and writes a
+    matching config to the log dir, so the test is self-contained — it does not
+    assume a config at a fixed repo path nor a pre-running metadata server.
+    """
     os.makedirs(_LOG_DIR, exist_ok=True)
     log_file = os.path.join(_LOG_DIR, "mooncake_e2e.log")
+
+    # Self-contained mooncake config: write to the log dir (portable, not tied
+    # to a repo path). MOONCAKE_CONFIG_PATH env, if set, overrides this.
+    # Must be JSON — vllm's MooncakeStoreConfig.from_file parses json, not yaml.
+    mc_config = os.environ.get(
+        "MOONCAKE_CONFIG_PATH",
+        os.path.join(_LOG_DIR, "mooncake_config.json"),
+    )
+    os.makedirs(os.path.dirname(mc_config), exist_ok=True)
+    import json
+
+    with open(mc_config, "w") as f:
+        json.dump(
+            {
+                "metadata_server": f"http://127.0.0.1:{_MC_METADATA_PORT}/metadata",
+                "master_server_address": f"127.0.0.1:{_MC_MASTER_PORT}",
+                "global_segment_size": "4GB",
+                "local_buffer_size": "4GB",
+                "protocol": "tcp",
+                "device_name": "",
+            },
+            f,
+        )
 
     # GPU config: CUDA_VISIBLE_DEVICES controls which GPUs Ray/vLLM see;
     # --n-gpus-per-node must match the count.
@@ -71,32 +103,49 @@ def _run_infer_with_mooncake(timeout: int = 600) -> str:
         _ROUTER,
         "--enable-mooncake",
         "--mooncake-config-path",
-        _MC_CONFIG,
+        mc_config,
     ]
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
     env["TRANSFORMERS_OFFLINE"] = "1"
     env["PYTHONHASHSEED"] = "0"
     env["CUDA_VISIBLE_DEVICES"] = cuda_vis
-    env["MOONCAKE_CONFIG_PATH"] = _MC_CONFIG
+    env["MOONCAKE_CONFIG_PATH"] = mc_config
     env["MC_TCP_ENABLE_CONNECTION_POOL"] = "1"
     env["MOONCAKE_CPU_STAGING"] = "1"
 
-    # Start mooncake_master
+    # Bring up the mooncake cluster: metadata server first (master depends on
+    # it), then master. Both are terminated in the finally below.
+    meta_log = open(os.path.join(_LOG_DIR, "mooncake_metadata.log"), "w")
     master_log = open(os.path.join(_LOG_DIR, "mooncake_master.log"), "w")
-    master_proc = subprocess.Popen(
-        ["mooncake_master", "--port", "50051", "--default_kv_lease_ttl", "60000"],
-        stdout=master_log,
-        stderr=subprocess.STDOUT,
-    )
-    time.sleep(5)
+    meta_proc = master_proc = None
+    try:
+        meta_proc = subprocess.Popen(
+            ["mooncake_http_metadata_server", "--port", str(_MC_METADATA_PORT), "--host", "127.0.0.1"],
+            stdout=meta_log,
+            stderr=subprocess.STDOUT,
+        )
+        time.sleep(3)
+        master_proc = subprocess.Popen(
+            ["mooncake_master", "--port", str(_MC_MASTER_PORT), "--default_kv_lease_ttl", "60000"],
+            stdout=master_log,
+            stderr=subprocess.STDOUT,
+        )
+        time.sleep(5)
 
-    with open(log_file, "w") as f:
-        subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, timeout=timeout)
-
-    master_proc.terminate()
-    master_proc.wait(timeout=10)
-    master_log.close()
+        with open(log_file, "w") as f:
+            subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, timeout=timeout)
+    finally:
+        for proc in (master_proc, meta_proc):
+            if proc is not None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        meta_log.close()
+        master_log.close()
 
     return open(log_file).read()
 
