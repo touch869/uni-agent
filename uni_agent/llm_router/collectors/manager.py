@@ -1,10 +1,10 @@
-"""CollectorProvider — lifecycle manager for data collectors.
+"""CollectorManager — lifecycle manager for data collectors.
 
-Strategies no longer query metrics through the provider — they read from the
+Strategies no longer query metrics through the manager — they read from the
 unified ``DataStore`` (which wraps the singleton ``MetricsStore`` /
-``KVCacheStore``). The provider now owns only collector construction and
+``KVCacheStore``). The manager now owns only collector construction and
 lifecycle (start/stop); metric-query proxies that used to live here have moved
-to ``DataStore`` (see ``DataStore.get_retained_occupancy``).
+to ``DataStore`` (see ``DataStore.kv_cache_load``).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from uni_agent.llm_router.collectors.collector import Collector, get_collector
 from uni_agent.llm_router.config.collector import CollectorConfig
 
 
-class CollectorProvider:
+class CollectorManager:
     """Lifecycle manager for data collectors.
 
     Args:

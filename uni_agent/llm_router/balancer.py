@@ -16,7 +16,7 @@ from typing import Any
 
 import ray
 
-from uni_agent.llm_router.collectors.provider import CollectorProvider
+from uni_agent.llm_router.collectors.manager import CollectorManager
 from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.store import DataStore
@@ -48,8 +48,11 @@ class KVCAwareBalancer:
         self._servers: dict[str, Any] = dict(servers)
         self._route_calls = 0
         self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
-        self._init_provider()
+        # _store before _init_manager: real env's _init_manager only wires the
+        # collector manager, but tests inject a fake store via _init_manager, so
+        # the real DataStore must be constructed first (and thus overridable).
         self._store = DataStore()
+        self._init_manager()
 
     @staticmethod
     def _resolve_max_num_seqs(servers: dict[str, Any]) -> int:
@@ -61,13 +64,13 @@ class KVCAwareBalancer:
             raise ValueError(f"server handle returned invalid max_num_seqs={value}")
         return value
 
-    def _init_provider(self) -> None:
-        """Resolve per-server endpoints from Ray actor handles and init the provider.
+    def _init_manager(self) -> None:
+        """Resolve per-server endpoints from Ray actor handles and init the manager.
 
         Iterates ``self._servers``, calling ``get_server_address.remote()`` and
         ``get_kv_events_endpoints.remote()`` on each handle to dynamically
         discover the Prometheus polling addresses and ZMQ kv-event endpoints.
-        The resolved addresses are then passed to ``CollectorProvider``, which
+        The resolved addresses are then passed to ``CollectorManager``, which
         routes them to the appropriate collector type at creation time.
 
         Handles that are not real Ray actors (e.g. plain strings passed by
@@ -100,13 +103,13 @@ class KVCAwareBalancer:
                 if endpoints is None:
                     continue
                 kv_event_endpoints[replica_id] = endpoints
-        self._provider = CollectorProvider(
+        self._manager = CollectorManager(
             self._config.collector,
             collection_names,
             server_addresses=server_addresses,
             kv_event_endpoints=kv_event_endpoints,
         )
-        self._provider.start()
+        self._manager.start()
 
     def get_all_servers(self) -> list[str]:
         """List all active server ids."""
@@ -115,13 +118,13 @@ class KVCAwareBalancer:
     def get_status(self) -> dict:
         """Return construction + routing state for debugging.
 
-        Reports what the balancer was wired with (pool, provider type,
+        Reports what the balancer was wired with (pool, manager type,
         materialized strategies) and how many routing decisions it has made —
         enough to verify the construction flow over the remote boundary.
         """
         return {
             "servers": list(self._servers.keys()),
-            "provider": type(self._provider).__name__,
+            "manager": type(self._manager).__name__,
             "strategies": [{"type": type(s).__name__, "weight": w} for s, w in self._strategies],
             "route_calls": self._route_calls,
             "sticky_size": len(self._sticky),
@@ -166,14 +169,14 @@ class KVCAwareBalancer:
     def add_servers(self, servers: dict[str, Any]) -> None:
         """Bulk-add servers to the pool.
 
-        Note: the provider is keyed by the endpoint addresses resolved at
+        Note: the manager is keyed by the endpoint addresses resolved at
         init time, not by this pool, so it is not touched here.
         """
         for sid, handle in servers.items():
             self._servers[sid] = handle
 
     def remove_servers(self, server_ids: list[str]) -> None:
-        """Bulk-remove servers from the pool (provider is not keyed by the pool).
+        """Bulk-remove servers from the pool (manager is not keyed by the pool).
 
         Also invalidates every sticky binding pointing at a removed server so a
         subsequent ``acquire_server`` for a bound conversation doesn't try to

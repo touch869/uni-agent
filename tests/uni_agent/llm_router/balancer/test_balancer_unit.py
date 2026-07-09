@@ -29,8 +29,8 @@ class TestKVCAwareBalancerConstruction:
         Expectation: _provider built and started; _strategies wired with weight
         """
         balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
-        assert balancer._provider.started is True
-        assert balancer._provider.collection_names == ["vllm_zmq"]
+        assert balancer._manager.started is True
+        assert balancer._manager.collection_names == ["vllm_zmq"]
         assert len(balancer._strategies) == 1
         strat, weight = balancer._strategies[0]
         assert isinstance(strat, KVCacheAwareStrategy)
@@ -59,11 +59,11 @@ class TestKVCAwareBalancerConstruction:
     def test_b03_construction_starts_provider(self):
         """
         Feature: construction starts the provider (lifecycle)
-        Description: construct balancer (autouse _FakeCollectorProvider) and check start()
+        Description: construct balancer (autouse _FakeCollectorManager) and check start()
         Expectation: the provider's start() is invoked during __init__
         """
         balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
-        assert balancer._provider.started is True
+        assert balancer._manager.started is True
 
 
 # ============================================================
@@ -91,9 +91,9 @@ class TestTrivialMethods:
         """
         balancer = _make_balancer({"s0": "h0"})
         status = balancer.get_status()
-        # provider is the injected _FakeCollectorProvider in unit tests; real env reports
-        # "CollectorProvider". Assert it matches the constructed provider's type.
-        assert status["provider"] == type(balancer._provider).__name__
+        # provider is the injected _FakeCollectorManager in unit tests; real env reports
+        # "CollectorManager". Assert it matches the constructed provider's type.
+        assert status["manager"] == type(balancer._manager).__name__
         assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
         assert status["servers"] == ["s0"]
         assert status["route_calls"] == 0
@@ -323,9 +323,9 @@ class _MetricsProvider:
 
     Configured per-replica metrics; returns real KV/load numbers so the real
     KVCacheAwareStrategy can compute s_load and decide overload + stickiness.
-    get_gpu_prefix_hit_rate / get_tier_prefix_hit_rate return empty → combined
-    scoring degrades to load-only (no cache term), which is fine for sticky
-    behavior: the deciding factor is whether the bound replica is overloaded.
+    get_layer_prefix_hit_rate returns 0.0 → combined scoring degrades to
+    load-only (no cache term), which is fine for sticky behavior: the deciding
+    factor is whether the bound replica is overloaded.
     """
 
     def __init__(self, metrics: dict[str, dict] | None = None):
@@ -343,14 +343,11 @@ class _MetricsProvider:
     def get_metric(self, replica_id, key):
         return self.get_metrics(replica_id).get(key, 0.0)
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids):
-        return {}
-
-    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
         return 0.0
 
-    def get_retained_occupancy(self, replica_id):
-        return None
+    def kv_cache_load(self, replica_id):
+        return 0.0
 
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
@@ -359,7 +356,7 @@ def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
     Defaults: kv=0.3 (→ load=0.12, NOT overloaded under load_threshold 0.9),
     running=0, waiting=0.
     """
-    from uni_agent.llm_router.metric_spec import MetricKey
+    from uni_agent.llm_router.types import MetricKey
 
     out = {}
     for sid, m in per_replica.items():

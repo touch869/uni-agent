@@ -8,11 +8,10 @@ import threading
 from collections import defaultdict
 from concurrent.futures import Future
 
-from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.collectors.decoder import Decoder, KVCacheUpdate, MetricsUpdate
 from uni_agent.llm_router.collectors.transport.base import Transport
-from uni_agent.llm_router.collectors.updates import KVCacheUpdate, MetricsUpdate
 from uni_agent.llm_router.config.collector import CollectorConfig
-from uni_agent.llm_router.metric_spec import MetricKey
+from uni_agent.llm_router.types import MetricKey
 from uni_agent.llm_router.store.data_store import DataStore
 
 logger = logging.getLogger(__name__)
@@ -119,14 +118,16 @@ class Collector:
             self._data_store.set_block_size(update.block_size)
         if update.clear_all:
             self._data_store.clear_kv_node(update.node_id)
-        if update.remove_blocks:
-            self._data_store.remove_kv_blocks(update.node_id, update.remove_blocks)
-        if update.add_blocks:
-            self._data_store.add_kv_blocks(update.node_id, update.add_blocks)
+        for layer, hashes in update.remove_blocks.items():
+            if hashes:
+                self._data_store.remove_kv_blocks(update.node_id, hashes, layer=layer)
+        for layer, hashes in update.add_blocks.items():
+            if hashes:
+                self._data_store.add_kv_blocks(update.node_id, hashes, layer=layer)
 
         # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
-        n_added = len(update.add_blocks) if update.add_blocks else 0
-        n_removed = len(update.remove_blocks) if update.remove_blocks else 0
+        n_added = sum(len(v) for v in update.add_blocks.values())
+        n_removed = sum(len(v) for v in update.remove_blocks.values())
         if update.clear_all:
             self._kv_event_counts["clear"] += 1
         if n_added:

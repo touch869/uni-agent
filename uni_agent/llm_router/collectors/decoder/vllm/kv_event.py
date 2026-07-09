@@ -31,6 +31,7 @@ class KVCacheEvent:
     parent_block_hash: str | None
     token_ids: list[bytes] | None
     block_size: int | None
+    medium: str | None = None
 
     # ── Factory ──────────────────────────────────────────────────────────
 
@@ -101,6 +102,16 @@ class KVCacheEvent:
             return cls._build_all_blocks_cleared(node_id)
         return None
 
+    @staticmethod
+    def _opt_str(fields: list | tuple, idx: int) -> str | None:
+        """A field as str, or None when absent/None.
+
+        Older vLLM omits trailing event fields, so absence is normal here.
+        """
+        if idx >= len(fields) or fields[idx] is None:
+            return None
+        return str(fields[idx])
+
     @classmethod
     def _build_block_stored(cls, fields: list | tuple, node_id: str) -> KVCacheEvent:
         """Build a BlockStored event from its field list.
@@ -121,6 +132,7 @@ class KVCacheEvent:
         parent_block_hash = str(fields[1]) if fields[1] is not None else None
         raw_token_ids = list(fields[2]) if fields[2] is not None else None
         block_size = int(fields[3])
+        medium = cls._opt_str(fields, 5)  # vLLM medium: "GPU" / "cpu"
 
         # Chop and encode token IDs into block-sized uint32 big-endian bytes
         token_ids = _convert_token_ids(raw_token_ids, block_size) if raw_token_ids is not None else None
@@ -132,6 +144,7 @@ class KVCacheEvent:
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
             block_size=block_size,
+            medium=medium,
         )
 
     @classmethod
@@ -144,6 +157,7 @@ class KVCacheEvent:
             2: group_idx    — int or None
         """
         block_hashes = [str(bh) for bh in fields[0]]
+        medium = cls._opt_str(fields, 1)
 
         return cls(
             event_type="removed",
@@ -152,6 +166,7 @@ class KVCacheEvent:
             parent_block_hash=None,
             token_ids=None,
             block_size=None,
+            medium=medium,
         )
 
     @classmethod

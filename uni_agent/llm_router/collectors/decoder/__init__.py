@@ -1,5 +1,9 @@
 """Decoders — backend-specific data decoding and store writing."""
 
-from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.collectors.decoder.base import (
+    Decoder,
+    KVCacheUpdate,
+    MetricsUpdate,
+)
 
-__all__ = ["Decoder"]
+__all__ = ["Decoder", "KVCacheUpdate", "MetricsUpdate"]

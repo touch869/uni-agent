@@ -4,6 +4,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from uni_agent.llm_router.balancer import KVCAwareBalancer
+from uni_agent.llm_router.types import MetricKey
 
 from ._helpers import (
     _router_config,
@@ -22,9 +23,9 @@ class _MetricsProvider:
 
     Configured per-replica metrics; returns real KV/load numbers so the real
     KVCacheAwareStrategy can compute s_load and decide overload + stickiness.
-    get_gpu_prefix_hit_rate / get_tier_prefix_hit_rate return empty → combined
-    scoring degrades to load-only (no cache term), which is fine for sticky
-    behavior: the deciding factor is whether the bound replica is overloaded.
+    get_layer_prefix_hit_rate returns 0.0 → combined scoring degrades to
+    load-only (no cache term), which is fine for sticky behavior: the deciding
+    factor is whether the bound replica is overloaded.
     """
 
     def __init__(self, metrics: dict[str, dict] | None = None):
@@ -42,14 +43,13 @@ class _MetricsProvider:
     def get_metric(self, replica_id, key):
         return self.get_metrics(replica_id).get(key, 0.0)
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids):
-        return {}
-
-    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
         return 0.0
 
-    def get_retained_occupancy(self, replica_id):
-        return None
+    def kv_cache_load(self, replica_id):
+        # Unit tests key the load signal on kv_cache_usage_perc (no kv-events /
+        # retained blocks simulated); mirror it so overload detection works.
+        return self.get_metric(replica_id, MetricKey.KV_CACHE_USAGE_PERC)
 
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
@@ -58,8 +58,6 @@ def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
     Defaults: kv=0.3 (→ load=0.12, NOT overloaded under load_threshold 0.9),
     running=0, waiting=0.
     """
-    from uni_agent.llm_router.metric_spec import MetricKey
-
     out = {}
     for sid, m in per_replica.items():
         out[sid] = {
@@ -79,14 +77,15 @@ class TestStickyEndToEnd:
         provider = _MetricsProvider(metrics)
 
         def fake_init(self):
-            self._provider = provider
+            self._manager = provider
+            self._store = provider  # _MetricsProvider doubles as the DataStore
 
-        orig = KVCAwareBalancer._init_provider
-        KVCAwareBalancer._init_provider = fake_init
+        orig = KVCAwareBalancer._init_manager
+        KVCAwareBalancer._init_manager = fake_init
         try:
             return KVCAwareBalancer(servers, _router_config())
         finally:
-            KVCAwareBalancer._init_provider = orig
+            KVCAwareBalancer._init_manager = orig
 
     def test_second_turn_same_request_stays_sticky(self):
         """Feature: bound + not overloaded → second turn routes to same server.
@@ -174,14 +173,14 @@ class TestStickyEndToEnd:
                 ],
             }
         )
-        orig = KVCAwareBalancer._init_provider
-        KVCAwareBalancer._init_provider = lambda self: setattr(
+        orig = KVCAwareBalancer._init_manager
+        KVCAwareBalancer._init_manager = lambda self: setattr(
             self,
-            "_provider",
+            "_manager",
             _MetricsProvider(_kv_metrics({"s0": {}})),
         )
         try:
             balancer = KVCAwareBalancer({"s0": "h0"}, cfg)
             assert balancer._sticky.max_size == 42
         finally:
-            KVCAwareBalancer._init_provider = orig
+            KVCAwareBalancer._init_manager = orig

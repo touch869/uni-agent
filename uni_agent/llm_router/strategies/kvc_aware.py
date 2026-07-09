@@ -6,9 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 from uni_agent.llm_router.logging import get_router_logger
-from uni_agent.llm_router.metric_spec import MetricKey
-from uni_agent.llm_router.strategies.load_score import DEFAULT_LOAD_WEIGHTS, load_normalized
 from uni_agent.llm_router.strategies.registry import StrategyRegistry
+from uni_agent.llm_router.types import Layer, MetricKey
 
 if TYPE_CHECKING:
     from uni_agent.llm_router.store import DataStore
@@ -17,6 +16,23 @@ if TYPE_CHECKING:
 logger = get_router_logger("kvc-aware-strategy")
 
 STICKY_TOP_SCORE = 1e9
+
+DEFAULT_LOAD_WEIGHTS: tuple[float, float, float] = (0.4, 0.3, 0.3)
+
+
+def load_normalized(
+    kv_usage: float,
+    running: int | float,
+    waiting: int | float,
+    *,
+    max_num_seqs: int,
+    weights: tuple[float, float, float] = DEFAULT_LOAD_WEIGHTS,
+) -> float:
+    """load = a·kv_usage + b·running/max_num_seqs + c·waiting/max_num_seqs (∈ [0,1], bigger = more loaded)."""
+    a, b, c = weights
+    running_usage = min(1.0, float(running) / float(max_num_seqs))
+    waiting_usage = min(1.0, float(waiting) / float(max_num_seqs))
+    return a * float(kv_usage) + b * running_usage + c * waiting_usage
 
 
 class StrategyError(Exception):
@@ -31,7 +47,7 @@ class KVCacheAwareStrategy:
         *,
         alpha: float,
         load_threshold: float,
-        layer_weights: dict[str, float],
+        layer_weights: dict[Layer, float],
         collector_names: list[str],
         weight: float,
         load_weights: tuple[float, float, float] = DEFAULT_LOAD_WEIGHTS,
@@ -40,12 +56,12 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
         if not 0 < load_threshold < 1:
             raise StrategyError(f"load_threshold must be in (0, 1), got {load_threshold}")
-        _valid_tiers = {"gpu", "cpu", "ssd"}
-        if set(layer_weights.keys()) != _valid_tiers:
-            raise StrategyError(f"layer_weights keys must be {_valid_tiers}, got {set(layer_weights.keys())}")
-        for tier, tier_weight in layer_weights.items():
-            if tier_weight < 0:
-                raise StrategyError(f"layer_weights[{tier}] must be >= 0, got {tier_weight}")
+        _valid_layers = {Layer.GPU, Layer.CPU, Layer.SSD}
+        if set(layer_weights.keys()) != _valid_layers:
+            raise StrategyError(f"layer_weights keys must be {_valid_layers}, got {set(layer_weights.keys())}")
+        for layer_key, layer_weight in layer_weights.items():
+            if layer_weight < 0:
+                raise StrategyError(f"layer_weights[{layer_key}] must be >= 0, got {layer_weight}")
         weights_sum = sum(layer_weights.values())
         if abs(weights_sum - 1.0) > 1e-6:
             raise StrategyError(f"layer_weights values must sum to 1.0, got {weights_sum}")
@@ -90,19 +106,6 @@ class KVCacheAwareStrategy:
             raise StrategyError("set_capacity() must be called before routing")
         return load_normalized(kv_usage, running, waiting, max_num_seqs=self._max_num_seqs, weights=self.load_weights)
 
-    def _resolve_kv_usage(self, store: DataStore, replica_id: str, m: dict) -> float:
-        """KV-cache occupancy for the load formula.
-
-        Prefers **retained occupancy** (``retained_blocks / num_gpu_blocks``),
-        which reflects free-pool blocks hash-marked for reuse and rises as
-        distinct prefixes accumulate; falls back to ``kv_cache_usage_perc``
-        (running-only) when retained data is unavailable.
-        """
-        retained_occ = store.get_retained_occupancy(replica_id)
-        if retained_occ is not None:
-            return retained_occ
-        return m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
-
     def is_overloaded(
         self,
         store: DataStore,
@@ -115,7 +118,7 @@ class KVCacheAwareStrategy:
         consults overload.
         """
         m = store.get_metrics(replica.replica_id)
-        kv_usage = self._resolve_kv_usage(store, replica.replica_id, m)
+        kv_usage = store.kv_cache_load(replica.replica_id)
         running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
         waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
         return self._compute_load(kv_usage, running, waiting) > self.load_threshold
@@ -143,7 +146,7 @@ class KVCacheAwareStrategy:
         for idx, replica in enumerate(replicas):
             if replica.replica_id == sticky_id:
                 m = store.get_metrics(replica.replica_id)
-                kv_usage = self._resolve_kv_usage(store, replica.replica_id, m)
+                kv_usage = store.kv_cache_load(replica.replica_id)
                 running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
                 waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
                 load = self._compute_load(kv_usage, running, waiting)
@@ -179,23 +182,17 @@ class KVCacheAwareStrategy:
             return shortcut
         effective_prompt_ids = prompt_ids or []
 
-        # GPU prefix hit is the same prompt for every replica — query once.
-        # get_gpu_prefix_hit_rate returns {replica_id: 0-100}; _cache_score
-        # scales each replica's value to 0-1.
-        gpu_hit_pct = store.get_gpu_prefix_hit_rate(effective_prompt_ids)
-
         result = []
         for replica in replicas:
             m = store.get_metrics(replica.replica_id)
-            kv_usage = self._resolve_kv_usage(store, replica.replica_id, m)
+            kv_usage = store.kv_cache_load(replica.replica_id)
             running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
             waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
             load = self._compute_load(kv_usage, running, waiting)
             s_load = 1.0 - load
-            s_cache = self._cache_score(store, replica, effective_prompt_ids, gpu_hit_pct)
+            s_cache, gpu_hit = self._cache_score(store, replica, effective_prompt_ids)
             score = self.alpha * s_cache + (1 - self.alpha) * s_load
             result.append(score)
-            gpu_hit = gpu_hit_pct.get(replica.replica_id, 0) / 100.0
             logger.info(
                 f"score(): replica={replica.replica_id} kv={kv_usage:.3f} running={running} waiting={waiting} "
                 f"→ load={load:.4f} s_load={s_load:.4f} | gpu_hit={gpu_hit:.2f} s_cache={s_cache:.4f} "
@@ -210,24 +207,21 @@ class KVCacheAwareStrategy:
         store: DataStore,
         replica: ReplicaInfo,
         prompt_ids: list[int],
-        gpu_hit_pct: dict[str, float],
-    ) -> float:
+    ) -> tuple[float, float]:
         """Three-layer weighted prefix-cache hit score ∈ [0, 1].
 
             S_cache = w_gpu·gpu_hit + w_cpu·cpu_hit + w_ssd·ssd_hit
 
-        ``gpu_hit`` comes from ``get_gpu_prefix_hit_rate`` (0-100, scaled to
-        0-1); ``cpu_hit``/``ssd_hit`` come from ``get_tier_prefix_hit_rate``
-        (``None`` → 0.0, e.g. when the mooncake tier collector is not yet
-        implemented). Weights come from ``self.layer_weights`` and are
-        validated to sum to 1.0 at construction, so the result is already in
-        [0, 1] with no extra normalization.
+        Each ``*_hit`` comes from ``get_layer_prefix_hit_rate`` (0.0–1.0; cpu/ssd
+        return 0.0 until the mooncake tier collector is wired). Returns
+        ``(s_cache, gpu_hit)`` so the caller logs gpu_hit without re-querying.
         """
-        gpu_hit = gpu_hit_pct.get(replica.replica_id, 0) / 100.0
-        cpu_hit = store.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, "cpu") or 0.0
-        ssd_hit = store.get_tier_prefix_hit_rate(replica.replica_id, prompt_ids, "ssd") or 0.0
+        gpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, prompt_ids, Layer.GPU) or 0.0
+        cpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, prompt_ids, Layer.CPU) or 0.0
+        ssd_hit = store.get_layer_prefix_hit_rate(replica.replica_id, prompt_ids, Layer.SSD) or 0.0
         w = self.layer_weights
-        return w["gpu"] * gpu_hit + w["cpu"] * cpu_hit + w["ssd"] * ssd_hit
+        s_cache = w[Layer.GPU] * gpu_hit + w[Layer.CPU] * cpu_hit + w[Layer.SSD] * ssd_hit
+        return s_cache, gpu_hit
 
 
 StrategyRegistry.register(KVCAwareStrategyConfig, KVCacheAwareStrategy)

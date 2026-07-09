@@ -1,13 +1,13 @@
-"""Tests for DataStore.get_gpu_prefix_hit_rate with real vLLM service + ZMQ KV events.
+"""Tests for DataStore.get_layer_prefix_hit_rate with real vLLM service + ZMQ KV events.
 
 Test flow:
 1. Launch a real vLLM model service with kv-events-config enabled (ZMQ publisher).
-2. Create CollectorProvider with collection_names=["vllm_zmq"], which internally
+2. Create CollectorManager with collection_names=["vllm_zmq"], which internally
    creates a Collector(ZMQTransport, VLLMKVDecoder) via get_collector().
 3. Call provider.start() to begin event subscription.
 4. Send inference requests via httpx to trigger KV cache block-stored events.
 5. Obtain prompt token IDs via vLLM /tokenize endpoint (messages format, with chat template).
-6. Call DataStore().get_gpu_prefix_hit_rate(prompt_ids) and verify the results.
+6. Call DataStore().get_layer_prefix_hit_rate(prompt_ids) and verify the results.
 """
 
 from __future__ import annotations
@@ -18,8 +18,9 @@ import httpx
 import pytest
 from conftest import NODE_ID, VLLM_MODEL, ZMQ_REPLAY_PORT, ZMQ_SUB_PORT, send_inference_request
 
-from uni_agent.llm_router.collectors.provider import CollectorProvider
+from uni_agent.llm_router.collectors.manager import CollectorManager
 from uni_agent.llm_router.config.collector import CollectorConfig
+from uni_agent.llm_router.types import Layer
 from uni_agent.llm_router.store.data_store import DataStore
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -60,8 +61,8 @@ def _get_token_ids(node_id: str, model: str, prompt: str) -> list[int]:
     return tokenizer(text, add_special_tokens=False).input_ids
 
 
-def _make_provider(node_id: str) -> CollectorProvider:
-    return CollectorProvider(
+def _make_provider(node_id: str) -> CollectorManager:
+    return CollectorManager(
         collectors_config=CollectorConfig(),
         collection_names=["vllm_zmq"],
         kv_event_endpoints={
@@ -76,14 +77,14 @@ def _make_provider(node_id: str) -> CollectorProvider:
 @pytest.mark.st
 @pytest.mark.gpu
 class TestGpuPrefixHitRateWithRealService:
-    """Integration tests: DataStore.get_gpu_prefix_hit_rate against a live vLLM ZMQ publisher."""
+    """Integration tests: DataStore.get_layer_prefix_hit_rate against a live vLLM ZMQ publisher."""
 
     def test_prefix_hit_rate_with_partial_match(self, vllm_kv_service):
         """
-        Feature: get_gpu_prefix_hit_rate returns 100% hit rate for a shorter prompt
+        Feature: get_layer_prefix_hit_rate returns 100% hit rate for a shorter prompt
         Description:
             1. Send an inference request with a long prompt A.
-            2. Call get_gpu_prefix_hit_rate with prompt B that is a strict prefix of A.
+            2. Call get_layer_prefix_hit_rate with prompt B that is a strict prefix of A.
         Expectation:
             Since B's blocks are a subset of A's cached blocks, all of B's prefix
             blocks are cached → hit_rate = 100.
@@ -107,23 +108,22 @@ class TestGpuPrefixHitRateWithRealService:
         provider.stop()
 
         store = DataStore()
-        result = store.get_gpu_prefix_hit_rate(short_ids)
+        hit = store.get_layer_prefix_hit_rate(NODE_ID, short_ids, Layer.GPU)
 
-        if len(result) == 0:
+        if hit == 0.0:
             pytest.skip(
                 f"Short prompt has {len(short_ids)} tokens — fewer than block_size "
                 f"or no full block formed; cannot assert prefix hit rate"
             )
 
-        assert NODE_ID in result, f"Expected NODE_ID '{NODE_ID}' in result keys, got {list(result.keys())}"
-        assert result[NODE_ID] == 100, f"Expected hit_rate=100 for prefix match, got {result[NODE_ID]}%"
+        assert hit == 1.0, f"Expected hit_rate=1.0 for prefix match, got {hit}"
 
     def test_prefix_hit_rate_returns_node_id_key(self, vllm_kv_service):
         """
-        Feature: get_gpu_prefix_hit_rate returns dict with node_id as key
+        Feature: get_layer_prefix_hit_rate returns dict with node_id as key
         Description:
             1. Send an inference request.
-            2. Call get_gpu_prefix_hit_rate with the prompt's token IDs.
+            2. Call get_layer_prefix_hit_rate with the prompt's token IDs.
         Expectation:
             Keys are node IDs in "host:port" format matching NODE_ID.
             Values are integers in [0, 100].
@@ -140,15 +140,6 @@ class TestGpuPrefixHitRateWithRealService:
         provider.stop()
 
         store = DataStore()
-        result = store.get_gpu_prefix_hit_rate(prompt_ids)
+        hit = store.get_layer_prefix_hit_rate(NODE_ID, prompt_ids, Layer.GPU)
 
-        assert len(result) > 0, f"Expected non-empty result, got {result}"
-        assert NODE_ID in result, f"Expected NODE_ID '{NODE_ID}' in result keys, got {list(result.keys())}"
-
-        for node_id, hit_rate in result.items():
-            assert ":" in node_id, f"Node ID should be 'host:port', got '{node_id}'"
-            host, port = node_id.rsplit(":", 1)
-            assert host == "127.0.0.1", f"Expected host '127.0.0.1', got '{host}'"
-            assert port.isdigit(), f"Port should be numeric, got '{port}'"
-            assert isinstance(hit_rate, int), f"Hit rate should be int, got {type(hit_rate).__name__}"
-            assert 0 <= hit_rate <= 100, f"Hit rate should be in [0, 100], got {hit_rate}"
+        assert 0.0 <= hit <= 1.0, f"Hit rate should be in [0.0, 1.0], got {hit}"

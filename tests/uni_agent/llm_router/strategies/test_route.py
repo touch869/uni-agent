@@ -128,14 +128,11 @@ class FakeRouteDataProvider:
     def get_metric(self, replica_id, key):
         return 0.0
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids):
-        return {}
-
-    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
         return 0.0
 
-    def get_retained_occupancy(self, replica_id):
-        return None
+    def kv_cache_load(self, replica_id):
+        return 0.0
 
 
 class ConstantStrategy:

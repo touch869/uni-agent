@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from uni_agent.llm_router.metric_spec import METRIC_SPECS
+from uni_agent.llm_router.types import METRIC_SPECS
 
 
 class MetricsStore:

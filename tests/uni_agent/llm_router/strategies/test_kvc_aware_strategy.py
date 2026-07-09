@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import pytest
 
-from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.strategies import (
     KVCacheAwareStrategy,
     RoutingStrategy,
@@ -25,7 +24,12 @@ from uni_agent.llm_router.strategies import (
     route,
 )
 from uni_agent.llm_router.strategies.base import ReplicaInfo
-from uni_agent.llm_router.strategies.kvc_aware import STICKY_TOP_SCORE
+from uni_agent.llm_router.strategies.kvc_aware import (
+    DEFAULT_LOAD_WEIGHTS,
+    STICKY_TOP_SCORE,
+    load_normalized,
+)
+from uni_agent.llm_router.types import Layer, MetricKey
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 # --------------------------------------------------------------------------- #
@@ -95,22 +99,16 @@ class FakeRouteDataProvider:
             MetricKey.NUM_REQUESTS_WAITING: entry.get("num_requests_waiting", 0),
         }
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids: list[int]) -> dict[str, int]:
-        """Returns {replica_id: hit_percent 0-100} for replicas with hits."""
-        result = {}
-        for replica_id, entry in self._data.items():
-            pct = entry.get("gpu_hit_pct", 0)
-            if pct > 0:
-                result[replica_id] = pct
-        return result
+    def get_layer_prefix_hit_rate(self, replica_id: str, prompt_ids: list[int], layer: str) -> float:
+        entry = self._data.get(replica_id, {})
+        if layer == Layer.GPU:
+            return entry.get("gpu_hit_pct", 0) / 100.0
+        return entry.get("tiers", {}).get(layer, 0.0)
 
-    def get_tier_prefix_hit_rate(self, replica_id: str, prompt_ids: list[int], tier: str) -> float:
-        return self._data.get(replica_id, {}).get("tiers", {}).get(tier, 0.0)
-
-    def get_retained_occupancy(self, replica_id: str) -> float | None:
-        # No retained-block data in unit tests → strategy falls back to
-        # kv_cache_usage_perc (the value unit-test expectations are built on).
-        return None
+    def kv_cache_load(self, replica_id: str) -> float | None:
+        # Unit tests key the load signal on kv_cache_usage_perc (no kv-events /
+        # retained blocks simulated); mirror it so the load formula sees it.
+        return self._data.get(replica_id, {}).get("kv_cache_usage_perc", 1.0)
 
 
 class ConstantStrategy:
@@ -399,44 +397,50 @@ class TestKVCAwareLoad:
 
 
 # --------------------------------------------------------------------------- #
-# _resolve_kv_usage: retained occupancy preferred over kv_cache_usage_perc
+# _resolve_kv_usage: kv_cache_load drives the load formula
 # --------------------------------------------------------------------------- #
-class TestRetainedLoad:
-    def test_retained_preferred_over_kv_cache_usage_perc(self):
+class TestResolveKVUsage:
+    def test_kv_cache_load_drives_load_formula(self):
         """
-        Feature: _resolve_kv_usage uses retained occupancy when available
-        Description: kv_cache_usage_perc=0.9 but retained=0.1
-        Expectation: load uses retained (0.1): load=0.4·0.1=0.04, s_load=0.96,
+        Feature: _resolve_kv_usage uses kv_cache_load (not kv_cache_usage_perc)
+        Description: data kv_cache_usage_perc=0.9 but kv_cache_load=0.1
+        Expectation: load uses kv_cache_load (0.1): load=0.4·0.1=0.04, s_load=0.96,
                      s_cache=0 → score=0.3·0.96=0.288 (not 0.192 from kv=0.9)
         """
 
-        class _RetainedProvider(FakeRouteDataProvider):
-            def __init__(self, data, retained):
+        class _LoadProvider(FakeRouteDataProvider):
+            def __init__(self, data, load):
                 super().__init__(data)
-                self._retained = retained
+                self._load = load
 
-            def get_retained_occupancy(self, replica_id):
-                return self._retained.get(replica_id)
+            def kv_cache_load(self, replica_id):
+                return self._load.get(replica_id)
 
         strat = _strat()
-        provider = _RetainedProvider(
+        provider = _LoadProvider(
             {"rep": {"kv_cache_usage_perc": 0.9, "num_requests_running": 0, "num_requests_waiting": 0}},
             {"rep": 0.1},
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep"))
         assert scores == pytest.approx([0.288])
 
-    def test_falls_back_to_kv_cache_usage_perc_when_retained_none(self):
+    def test_kv_cache_load_zero_drives_zero_load(self):
         """
-        Feature: retained None → fallback to kv_cache_usage_perc
-        Expectation: load=0.4·0.5=0.2, s_load=0.8, s_cache=0 → score=0.3·0.8=0.24
+        Feature: kv_cache_load 0.0 (retained unavailable) → load=0
+        Description: kv_cache_load returns 0.0 (no kv-events / retained blocks)
+        Expectation: kv=0 → load=0 → s_load=1.0, s_cache=0 → score=0.3·1.0=0.3
         """
+
+        class _ZeroLoadProvider(FakeRouteDataProvider):
+            def kv_cache_load(self, replica_id):
+                return 0.0
+
         strat = _strat()
-        provider = FakeRouteDataProvider(
+        provider = _ZeroLoadProvider(
             {"rep": {"kv_cache_usage_perc": 0.5, "num_requests_running": 0, "num_requests_waiting": 0}}
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep"))
-        assert scores == pytest.approx([0.24])
+        assert scores == pytest.approx([0.3])
 
 
 # --------------------------------------------------------------------------- #
@@ -451,8 +455,8 @@ class TestKVCAwareCacheScore:
         """
         strat = _strat()
         provider = FakeRouteDataProvider({"rep": {"gpu_hit_pct": 80, "tiers": {"cpu": 0.6, "ssd": 0.2}}})
-        gpu_hit_pct = provider.get_gpu_prefix_hit_rate(PROMPT_IDS)  # {"rep": 80}
-        assert strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS, gpu_hit_pct) == pytest.approx(0.70)
+        s_cache, _ = strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS)
+        assert s_cache == pytest.approx(0.70)
 
     def test_gpu_only_when_tier_none(self):
         """
@@ -462,13 +466,15 @@ class TestKVCAwareCacheScore:
         """
 
         class _NoneProvider(FakeRouteDataProvider):
-            def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+            def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
+                if layer == Layer.GPU:
+                    return super().get_layer_prefix_hit_rate(replica_id, prompt_ids, layer)
                 return None
 
         strat = _strat()
         provider = _NoneProvider({"rep": {"gpu_hit_pct": 80, "tiers": {}}})
-        gpu_hit_pct = {"rep": 80}
-        assert strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS, gpu_hit_pct) == pytest.approx(0.56)
+        s_cache, _ = strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS)
+        assert s_cache == pytest.approx(0.56)
 
     def test_no_hit_returns_zero(self):
         """
@@ -478,7 +484,8 @@ class TestKVCAwareCacheScore:
         """
         strat = _strat()
         provider = FakeRouteDataProvider({"rep": {"tiers": {"cpu": 0.0, "ssd": 0.0}}})
-        assert strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS, {}) == pytest.approx(0.0)
+        s_cache, _ = strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS)
+        assert s_cache == pytest.approx(0.0)
 
     def test_custom_weights_respected(self):
         """
@@ -488,8 +495,8 @@ class TestKVCAwareCacheScore:
         """
         strat = _strat(layer_weights={"gpu": 0.5, "cpu": 0.3, "ssd": 0.2})
         provider = FakeRouteDataProvider({"rep": {"gpu_hit_pct": 100, "tiers": {"cpu": 1.0, "ssd": 1.0}}})
-        gpu_hit_pct = {"rep": 100}
-        assert strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS, gpu_hit_pct) == pytest.approx(1.0)
+        s_cache, _ = strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS)
+        assert s_cache == pytest.approx(1.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -529,14 +536,16 @@ class TestKVCAwareTierWeights:
 
     def test_tier_none_treated_as_zero(self):
         """
-        Feature: None return from get_tier_prefix_hit_rate is treated as 0.0
-        Description: provider returns None for tier hit rate
+        Feature: None return from get_layer_prefix_hit_rate is treated as 0.0
+        Description: provider returns None for cpu/ssd layer hit rate
         Expectation: score = (1-α)·s_load (S_cache=0), no TypeError
           rep: load=0.2→s_load=0.8; s_cache=0; score=0.3·0.8=0.24
         """
 
         class _NoneProvider(FakeRouteDataProvider):
-            def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+            def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
+                if layer == Layer.GPU:
+                    return super().get_layer_prefix_hit_rate(replica_id, prompt_ids, layer)
                 return None
 
         strat = _strat()
@@ -881,3 +890,39 @@ class TestStickyShortCircuit:
         replicas = _replicas("rep_a", "rep_b")
         ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, None, None)
         assert ranking[0] == "rep_a"
+
+
+# --------------------------------------------------------------------------- #
+# load_normalized (load formula)
+# --------------------------------------------------------------------------- #
+class TestLoadNormalized:
+    def test_idle_replica_is_zero(self):
+        assert load_normalized(0.0, 0, 0, max_num_seqs=64) == pytest.approx(0.0)
+
+    def test_kv_only_contribution(self):
+        assert load_normalized(0.5, 0, 0, max_num_seqs=64) == pytest.approx(0.2)
+
+    def test_running_and_kv(self):
+        assert load_normalized(0.5, 32, 0, max_num_seqs=64) == pytest.approx(0.35)
+
+    def test_running_clamped_to_one(self):
+        assert load_normalized(0.8, 128, 0, max_num_seqs=64) == pytest.approx(0.62)
+
+    def test_waiting_term(self):
+        assert load_normalized(0.0, 0, 10, max_num_seqs=64) == pytest.approx(0.3 * (10 / 64))
+
+    def test_custom_weights_change_load(self):
+        load = load_normalized(0.5, 32, 0, max_num_seqs=64, weights=(0.6, 0.2, 0.2))
+        assert load == pytest.approx(0.4)
+        assert load != pytest.approx(0.35)
+
+    def test_near_saturated_exceeds_threshold(self):
+        load = load_normalized(1.0, 64, 1000, max_num_seqs=64)
+        assert load > 0.9
+        assert load <= 1.0
+
+
+class TestDefaultWeights:
+    def test_default_weights_tuple(self):
+        assert DEFAULT_LOAD_WEIGHTS == (0.4, 0.3, 0.3)
+        assert sum(DEFAULT_LOAD_WEIGHTS) == pytest.approx(1.0)

@@ -1,6 +1,6 @@
 """conftest for balancer tests.
 
-Applies the _FakeCollectorProvider patch ONLY when balancer ut tests are being run.
+Applies the _FakeCollectorManager patch ONLY when balancer ut tests are being run.
 When st-cpu/e2e tests run (different pytest invocation, different -m filter),
 no balancer ut tests are selected, so the patch is a no-op.
 """
@@ -12,7 +12,7 @@ import pytest
 
 @pytest.fixture(autouse=True, scope="session")
 def _conditional_patch(request):
-    """Patch CollectorProvider + _init_provider + _resolve_max_num_seqs — only if balancer ut tests run."""
+    """Patch CollectorManager + _init_manager + _resolve_max_num_seqs — only if balancer ut tests run."""
     has_balancer_ut = any(
         "balancer" in str(item.fspath) and item.get_closest_marker("ut") for item in request.session.items
     )
@@ -22,22 +22,22 @@ def _conditional_patch(request):
 
     import uni_agent.llm_router.collectors as _collectors_mod
     from tests.uni_agent.llm_router.balancer._helpers import (
-        _fake_init_provider,
+        _fake_init_manager,
         _fake_resolve_max_num_seqs,
-        _FakeCollectorProvider,
+        _FakeCollectorManager,
     )
     from uni_agent.llm_router.balancer import KVCAwareBalancer
 
-    _orig_provider = _collectors_mod.CollectorProvider
-    _orig_init = KVCAwareBalancer._init_provider
+    _orig_provider = _collectors_mod.CollectorManager
+    _orig_init = KVCAwareBalancer._init_manager
     _orig_resolve = KVCAwareBalancer._resolve_max_num_seqs
 
-    _collectors_mod.CollectorProvider = _FakeCollectorProvider
-    KVCAwareBalancer._init_provider = _fake_init_provider
+    _collectors_mod.CollectorManager = _FakeCollectorManager
+    KVCAwareBalancer._init_manager = _fake_init_manager
     KVCAwareBalancer._resolve_max_num_seqs = staticmethod(_fake_resolve_max_num_seqs)
 
     yield
 
-    _collectors_mod.CollectorProvider = _orig_provider
-    KVCAwareBalancer._init_provider = _orig_init
+    _collectors_mod.CollectorManager = _orig_provider
+    KVCAwareBalancer._init_manager = _orig_init
     KVCAwareBalancer._resolve_max_num_seqs = _orig_resolve

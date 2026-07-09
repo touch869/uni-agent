@@ -1,6 +1,6 @@
 """Helpers for balancer unit tests.
 
-Defines ``FakeDataStore`` (query stub), ``_FakeCollectorProvider`` (lifecycle
+Defines ``FakeDataStore`` (query stub), ``_FakeCollectorManager`` (lifecycle
 stub), and helper functions.  Patching is done by ``conftest.py`` via a
 session-scoped autouse fixture (``_conditional_patch``) that only fires when
 balancer ut tests are selected, so it never leaks to Ray workers in other test
@@ -17,7 +17,7 @@ class FakeDataStore:
 
     In the new architecture routing reads metrics from ``DataStore`` (passed to
     ``route()`` as ``store``), not from the provider. Unit tests therefore
-    inject a ``FakeDataStore`` as ``balancer._store`` (via ``_fake_init_provider``)
+    inject a ``FakeDataStore`` as ``balancer._store`` (via ``_fake_init_manager``)
     so strategies read empty/default values without touching the real
     singleton-backed ``DataStore``. Per-replica metrics can be supplied at
     construction by tests that need non-empty data.
@@ -32,18 +32,15 @@ class FakeDataStore:
     def get_metrics(self, replica_id):
         return dict(self._metrics.get(replica_id, {}))
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids):
-        return {}
-
-    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
         return 0.0
 
-    def get_retained_occupancy(self, replica_id):
-        return None
+    def kv_cache_load(self, replica_id):
+        return 0.0
 
 
-class _FakeCollectorProvider:
-    """Stand-in for ``CollectorProvider`` — a pure lifecycle stub.
+class _FakeCollectorManager:
+    """Stand-in for ``CollectorManager`` — a pure lifecycle stub.
 
     The provider only constructs and starts/stops collectors; routing reads
     metrics from ``DataStore`` (here ``FakeDataStore``), not from the provider.
@@ -82,21 +79,21 @@ def _router_config(weight: float = 1.0):
     )
 
 
-def _fake_init_provider(self):
-    """Replacement for KVCAwareBalancer._init_provider in unit tests.
+def _fake_init_manager(self):
+    """Replacement for KVCAwareBalancer._init_manager in unit tests.
 
-    Injects a lifecycle-only ``_FakeCollectorProvider`` (so construction is
+    Injects a lifecycle-only ``_FakeCollectorManager`` (so construction is
     observable) AND a ``FakeDataStore`` as ``self._store``, overriding the real
     ``DataStore()`` the Balancer constructed in ``__init__``. Strategies read
     from ``self._store`` via ``route()``, so they see the fake, not the real
     singleton-backed store — keeping unit tests hermetic from collector data.
     """
     collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
-    self._provider = _FakeCollectorProvider(
+    self._manager = _FakeCollectorManager(
         self._config.collector,
         collection_names,
     )
-    self._provider.start()
+    self._manager.start()
     self._store = FakeDataStore()
 
 

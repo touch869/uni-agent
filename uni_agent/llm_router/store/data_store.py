@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.store.metrics_store import MetricsStore
+from uni_agent.llm_router.types import Layer, MetricKey
 
 
 class DataStore:
@@ -92,23 +92,25 @@ class DataStore:
         if self._kv.block_size is None:
             self._kv.block_size = size
 
-    def add_kv_blocks(self, node_id: str, block_hashes: list[str]) -> None:
+    def add_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Add KV cache blocks to a node.
 
         Args:
             node_id: Target node.
             block_hashes: List of local prefix hashes to add.
+            layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
         """
-        self._kv.add_blocks(node_id, block_hashes)
+        self._kv.add_blocks(node_id, block_hashes, layer=layer)
 
-    def remove_kv_blocks(self, node_id: str, block_hashes: list[str]) -> None:
+    def remove_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Remove KV cache blocks from a node.
 
         Args:
             node_id: Target node.
             block_hashes: List of local prefix hashes to remove.
+            layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
         """
-        self._kv.remove_blocks(node_id, block_hashes)
+        self._kv.remove_blocks(node_id, block_hashes, layer=layer)
 
     def clear_kv_node(self, node_id: str) -> None:
         """Clear all KV cache blocks for a node.
@@ -132,54 +134,40 @@ class DataStore:
 
     # ── KV cache prefix hit rate queries ────────────────────────────────
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids: list[int]) -> dict[str, int]:
-        """Match prefix hashes against cached blocks, return per-node hit percent.
-
-        Args:
-            prompt_ids: Current request's prompt token IDs.
-
-        Returns:
-            Dict of node_id → prefix_match_percent (0–100).
-            Empty dict if block_size is unknown or no full blocks.
-        """
-        return self._kv.get_gpu_prefix_hit_rate(prompt_ids)
-
-    def get_tier_prefix_hit_rate(
+    def get_layer_prefix_hit_rate(
         self,
         node_id: str,
         prompt_ids: list[int],
-        tier: str,
+        layer: Layer = Layer.GPU,
     ) -> float:
-        """Query tier-level prefix cache hit rate.
+        """Query prefix-cache hit rate for a node at a given layer.
 
         Args:
             node_id: Target node.
             prompt_ids: Current request's prompt token IDs.
-            tier: ``"cpu"`` or ``"ssd"``.
+            layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
 
         Returns:
             Hit rate 0.0–1.0.
         """
-        return self._kv.get_tier_prefix_hit_rate(node_id, prompt_ids, tier)
+        return self._kv.get_layer_prefix_hit_rate(node_id, prompt_ids, layer)
 
-    # ── Retained-cache occupancy (load signal) ──────────────────────────
+    # ── KV-cache load (load signal) ─────────────────────────────────────
 
-    def get_retained_occupancy(self, node_id: str) -> float | None:
-        """Retained-cache occupancy = ``retained_blocks / num_gpu_blocks`` (∈ [0,1]).
+    def kv_cache_load(self, node_id: str) -> float:
+        """KV-cache load = ``retained_blocks / num_gpu_blocks`` (∈ [0,1]).
 
-        Unlike ``kv_cache_usage_perc`` (running-only), this rises as distinct
-        prefixes accumulate in the free pool and signals impending LRU
-        eviction. Returns ``None`` when retained blocks or ``num_gpu_blocks``
-        is unavailable (e.g. mc-off groups emit no kv-events), so the caller
-        (``KVCacheAwareStrategy._resolve_kv_usage``) falls back to
-        ``kv_cache_usage_perc``.
+        Retained blocks (free-pool blocks hash-marked for reuse) over the GPU
+        block pool — rises as distinct prefixes accumulate and signals impending
+        LRU eviction. Returns 0.0 when retained blocks or ``num_gpu_blocks`` is
+        unavailable (e.g. mc-off groups emit no kv-events).
         """
         retained = self._kv.per_replica_block_counts().get(node_id, 0)
         if retained <= 0:
-            return None
+            return 0.0
         total = self._metrics.get(node_id, MetricKey.NUM_GPU_BLOCKS)
         if not total or total <= 0:
-            return None
+            return 0.0
         return min(1.0, retained / float(total))
 
     def per_replica_block_counts(self) -> dict[str, int]:

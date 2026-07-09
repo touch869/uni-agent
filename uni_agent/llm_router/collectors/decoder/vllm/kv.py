@@ -6,13 +6,11 @@ Store writes are handled by Collector via DataStore.
 
 from __future__ import annotations
 
-from typing import Any
-
 import msgpack
 
-from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.collectors.decoder import Decoder, KVCacheUpdate
 from uni_agent.llm_router.collectors.decoder.vllm.kv_event import KVCacheEvent
-from uni_agent.llm_router.collectors.updates import KVCacheUpdate
+from uni_agent.llm_router.types import Layer
 from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.utils.hash import compute_hash
 
@@ -22,7 +20,8 @@ logger = get_router_logger("vllm-kv")
 class VLLMKVDecoder(Decoder):
     """vLLM KV-cache decoder — msgpack payload → KVCacheUpdate.
 
-    Parses msgpack payloads and returns structured update commands.
+    Each event type has a dedicated handler that folds its blocks into a single
+    ``KVCacheUpdate`` accumulator; ``decode`` is pure dispatch.
 
     Attributes:
         remote_to_local_block_hash: Mapping from vLLM remote block_hash
@@ -30,6 +29,10 @@ class VLLMKVDecoder(Decoder):
             hash computation.
         _block_size: Learned block size from first event.
     """
+
+    # vLLM BlockStored/BlockRemoved ``medium`` → canonical layer.
+    # Unknown / None (older vLLM) → GPU (see ``_medium_to_layer``).
+    _MEDIUM_TO_LAYER: dict[str, Layer] = {"GPU": Layer.GPU, "cpu": Layer.CPU}
 
     def __init__(self) -> None:
         self.remote_to_local_block_hash: dict[str, str] = {}
@@ -49,7 +52,6 @@ class VLLMKVDecoder(Decoder):
         Returns:
             KVCacheUpdate with operations to apply, or None if decode failed.
         """
-        # ZMQ delivers bytes; ignore string data (shouldn't happen for this decoder)
         if isinstance(raw_data, str):
             logger.debug("VLLMKVDecoder received string data, expected bytes — skipping")
             return None
@@ -57,48 +59,24 @@ class VLLMKVDecoder(Decoder):
         try:
             raw = msgpack.unpackb(raw_data, raw=False)
 
-            # Determine if raw is single event or multiple events
-            # Single: [timestamp, [...]] where timestamp is int
-            # Multiple: [[timestamp, [...]], ...] where first element is list
             if not isinstance(raw, list) or len(raw) == 0:
                 logger.warning("Unexpected msgpack format from node %s", node_id)
                 return None
             event_payloads = raw if isinstance(raw[0], list) else [raw]
 
-            # Aggregate all operations from all payloads
-            add_blocks: list[str] = []
-            remove_blocks: list[str] = []
-            clear_all = False
-            learned_block_size: int | None = None
-
+            update = KVCacheUpdate(node_id=node_id)
             for payload in event_payloads:
                 events = KVCacheEvent.from_raw(payload, default_node_id=node_id)
-
                 for event in events:
                     if event.event_type == "stored":
-                        result = self._process_stored(event)
-                        if result is None:
-                            continue
-                        add_blocks.extend(result["add_blocks"])
-                        if result["block_size"] is not None:
-                            learned_block_size = result["block_size"]
-
+                        self._on_block_stored(event, update)
                     elif event.event_type == "removed":
-                        remove_blocks.extend(self._process_removed(event))
-
+                        self._on_block_removed(event, update)
                     elif event.event_type == "clear":
-                        clear_all = True
-
+                        self._on_all_blocks_cleared(event, update)
                     else:
                         raise ValueError(f"Unknow event.event_type {event.event_type}.")
-
-            return KVCacheUpdate(
-                node_id=node_id,
-                add_blocks=add_blocks,
-                remove_blocks=remove_blocks,
-                clear_all=clear_all,
-                block_size=learned_block_size,
-            )
+            return update
 
         except (msgpack.UnpackException, ValueError, TypeError) as exc:
             logger.warning(
@@ -108,26 +86,24 @@ class VLLMKVDecoder(Decoder):
             )
             return None
 
-    # ── Event processors ────────────────────────────────────────────────
+    @classmethod
+    def _medium_to_layer(cls, medium: str | None) -> Layer:
+        """Map a vLLM ``medium`` to a canonical layer; None/unknown → GPU."""
+        return cls._MEDIUM_TO_LAYER.get(medium, Layer.GPU)
 
-    def _process_stored(self, event: KVCacheEvent) -> dict[str, Any] | None:
-        """Process BlockStored: compute local hashes.
+    # ── Event handlers ──────────────────────────────────────────────────
 
-        Returns:
-            Dict with "add_blocks" (list[str]) and "block_size" (int | None).
-        """
-        seed = 0
-
+    def _on_block_stored(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
+        """Handle BlockStored: learn block_size, compute local hashes, fold into update."""
         if event.token_ids is None:
             logger.debug("Stored event has no token_ids — skipping")
-            return None
+            return
 
-        # Learn block_size from first event
-        learned_block_size = None
         if self._block_size is None and event.block_size is not None:
             self._block_size = event.block_size
-            learned_block_size = event.block_size
+            update.set_block_size(event.block_size)
 
+        seed = 0
         local_parent_hash = seed
         if event.parent_block_hash is not None:
             local_parent_str = self.remote_to_local_block_hash.get(event.parent_block_hash)
@@ -149,19 +125,18 @@ class VLLMKVDecoder(Decoder):
             local_hashes.append(local_hash_str)
             local_parent_hash = local_hash_int  # chain
 
-        return {"add_blocks": local_hashes, "block_size": learned_block_size}
+        update.add(self._medium_to_layer(event.medium), local_hashes)
 
-    def _process_removed(self, event: KVCacheEvent) -> list[str]:
-        """Process BlockRemoved: convert remote hashes to local.
-
-        Returns:
-            List of local hashes to remove.
-        """
+    def _on_block_removed(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
+        """Handle BlockRemoved: convert remote hashes to local, fold into update."""
         local_hashes = [
             self.remote_to_local_block_hash[bh] for bh in event.block_hashes if bh in self.remote_to_local_block_hash
         ]
-        # Clean up mapping
         for bh in event.block_hashes:
             self.remote_to_local_block_hash.pop(bh, None)
 
-        return local_hashes
+        update.remove(self._medium_to_layer(event.medium), local_hashes)
+
+    def _on_all_blocks_cleared(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
+        """Handle AllBlocksCleared: mark the replica for a full clear."""
+        update.clear()

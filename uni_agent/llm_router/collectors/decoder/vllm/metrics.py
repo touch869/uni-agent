@@ -8,10 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from uni_agent.llm_router.collectors.decoder.base import Decoder
-from uni_agent.llm_router.collectors.updates import MetricsUpdate
+from uni_agent.llm_router.collectors.decoder import Decoder, MetricsUpdate
 from uni_agent.llm_router.logging import get_router_logger
-from uni_agent.llm_router.metric_spec import METRIC_SPECS, MetricKey
+from uni_agent.llm_router.types import METRIC_SPECS, MetricKey
 
 logger = get_router_logger("vllm-metrics")
 
