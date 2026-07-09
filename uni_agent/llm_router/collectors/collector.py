@@ -11,10 +11,11 @@ from concurrent.futures import Future
 from uni_agent.llm_router.collectors.decoder import Decoder, KVCacheUpdate, MetricsUpdate
 from uni_agent.llm_router.collectors.transport.base import Transport
 from uni_agent.llm_router.config.collector import CollectorConfig
+from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.types import MetricKey
 from uni_agent.llm_router.store.data_store import DataStore
 
-logger = logging.getLogger(__name__)
+logger = get_router_logger("collector")
 
 # Log polled Prometheus metrics every N metrics-writes (≈every 10 s at the
 # default 1 s polling interval × a few replicas). Lets us compare what the

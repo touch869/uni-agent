@@ -102,6 +102,10 @@ class KVCAwareBalancer:
                 server_addresses[replica_id] = f"{ip}:{port}"
                 if endpoints is None:
                     continue
+                # verl returns [sub_addr, replay_addr]; ZMQTransport needs
+                # [sub, replay, publisher, topic] — pad the trailing pair.
+                if len(endpoints) == 2:
+                    endpoints = [*endpoints, "zmq", "kv-events"]
                 kv_event_endpoints[replica_id] = endpoints
         self._manager = CollectorManager(
             self._config.collector,
