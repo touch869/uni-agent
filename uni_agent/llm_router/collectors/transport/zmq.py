@@ -26,7 +26,7 @@ class _EndpointSocketSet:
     node_id: str
     context: zmq.asyncio.Context
     sub_socket: zmq.asyncio.Socket
-    replay_socket: zmq.asyncio.Socket
+    replay_socket: zmq.asyncio.Socket | None
     closed: bool = False
 
 
@@ -58,6 +58,8 @@ class ZMQTransport(Transport):
         self._retry_backoff_factor = retry_backoff_factor
 
         # endpoints: {node_id: [sub_endpoint, replay_endpoint, publisher, topic]}
+        # replay_endpoint may be empty ("") for sub-only mode (e.g. standalone
+        # collector that has no Ray RPC to discover the replay socket).
         self._sub_endpoints: dict[str, str] = {}
         self._replay_endpoints: dict[str, str] = {}
         self._topics: dict[str, str] = {}
@@ -69,7 +71,7 @@ class ZMQTransport(Transport):
             if addrs[2] != "zmq":
                 raise ValueError(f"endpoint '{node_id}' publisher must be 'zmq', got '{addrs[2]}'")
             self._sub_endpoints[node_id] = f"tcp://{addrs[0]}"
-            self._replay_endpoints[node_id] = f"tcp://{addrs[1]}"
+            self._replay_endpoints[node_id] = f"tcp://{addrs[1]}" if addrs[1] else ""
             self._topics[node_id] = addrs[3]
 
         self._stopped = False
@@ -116,7 +118,11 @@ class ZMQTransport(Transport):
         sub_addr: str,
         replay_addr: str,
     ) -> bool:
-        """Create ZMQ context and replay + sub dual socket for a single endpoint."""
+        """Create ZMQ context and replay + sub dual socket for a single endpoint.
+
+        If ``replay_addr`` is empty (sub-only mode), the replay REQ socket is
+        skipped — used by the standalone collector which has no replay endpoint.
+        """
         try:
             ctx = zmq.asyncio.Context()
 
@@ -124,8 +130,10 @@ class ZMQTransport(Transport):
             sub_socket.connect(sub_addr)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, self._topics[node_id])
 
-            replay_socket = ctx.socket(zmq.REQ)
-            replay_socket.connect(replay_addr)
+            replay_socket = None
+            if replay_addr:
+                replay_socket = ctx.socket(zmq.REQ)
+                replay_socket.connect(replay_addr)
 
             self._endpoint_sockets[node_id] = _EndpointSocketSet(
                 node_id=node_id,
@@ -148,7 +156,8 @@ class ZMQTransport(Transport):
             return
         sockets.closed = True
         sockets.sub_socket.close(linger=0)
-        sockets.replay_socket.close(linger=0)
+        if sockets.replay_socket is not None:
+            sockets.replay_socket.close(linger=0)
         sockets.context.term()
 
     def _close_all_zmq_sockets(self) -> None:
@@ -187,13 +196,16 @@ class ZMQTransport(Transport):
         replay_addr: str,
         handler: Callable[[bytes | str, str], None],
     ) -> None:
-        """Per-endpoint subscription: connect → replay → subscribe loop."""
+        """Per-endpoint subscription: connect → replay (if available) → subscribe loop."""
         try:
             if not await self._connect_zmq_for(node_id, sub_addr, replay_addr):
                 if not await self._reconnect_with_backoff_for(node_id, sub_addr, replay_addr):
                     return
 
-            await self._replay_historical_data_for(node_id, handler)
+            # Replay historical events only when a replay socket is connected
+            # (sub-only mode skips this — standalone collector has no replay endpoint).
+            if replay_addr:
+                await self._replay_historical_data_for(node_id, handler)
 
             sockets = self._endpoint_sockets.get(node_id)
             if sockets is None:
@@ -208,7 +220,8 @@ class ZMQTransport(Transport):
                     self._close_zmq_sockets_for(node_id)
                     if not await self._reconnect_with_backoff_for(node_id, sub_addr, replay_addr):
                         break
-                    await self._replay_historical_data_for(node_id, handler)
+                    if replay_addr:
+                        await self._replay_historical_data_for(node_id, handler)
 
         except asyncio.CancelledError:
             pass

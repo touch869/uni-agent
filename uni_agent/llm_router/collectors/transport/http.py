@@ -43,7 +43,7 @@ class HTTPTransport(Transport):
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Start the HTTP polling loop — delivers response text to handler."""
-        self._client = httpx.AsyncClient(timeout=self._http_timeout)
+        self._client = httpx.AsyncClient(timeout=self._http_timeout, trust_env=False)
         try:
             while True:
                 coros = {nid: self._client.get(url) for nid, url in self._endpoints.items()}
