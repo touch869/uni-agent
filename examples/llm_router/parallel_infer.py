@@ -66,7 +66,13 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.actor_rollout_ref.rollout.response_length = args.response_length
     config.actor_rollout_ref.rollout.n = args.n
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = args.tensor_parallel_size
-    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
+    # 0.8: vllm-ascend sees ~60.95GiB total (driver reserves ~3GB of 64). Daytime shared
+    # cards have volatile free mem (others occupy NPU0/1); 0.9/0.85 triggered
+    # "Free memory ... less than desired GPU memory utilization" OOM at init_device when
+    # free dropped to 46-53GiB. 0.8×60.95≈48.8GiB survives daytime contention; at night
+    # (cards cleared, free ~60GiB) leaves big headroom. KV pool ~600K tok/rep (plenty
+    # for 960 traj pressure test). Raise back to 0.9 only on exclusively-idle cards.
+    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.8
     config.actor_rollout_ref.rollout.max_num_seqs = args.max_num_seqs
     if args.max_model_len is not None:
         config.actor_rollout_ref.rollout.max_model_len = args.max_model_len
@@ -82,8 +88,10 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     if args.enable_mooncake:
         # MooncakeStoreConnector for cross-replica KV sharing.
         # Config via MOONCAKE_CONFIG_PATH env, not extra_config.
+        # vllm-ascend connector name is "MooncakeConnectorStoreV1" (not GPU's "MooncakeStoreConnector").
+        # See planning/20260707-kvcare-router-ascend910b3/findings.md §8 for the full diff.
         vllm_kwargs["kv_transfer_config"] = {
-            "kv_connector": "MooncakeStoreConnector",
+            "kv_connector": "MooncakeConnectorStoreV1",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {},
         }

@@ -129,3 +129,11 @@ logs
 log
 outputs
 .history
+
+# Claude Code session data
+.claude/
+
+# experiment data (archives + raw logs) — keep only markdown docs
+**/results/
+**/*.log
+**/logs/
