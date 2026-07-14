@@ -11,3 +11,4 @@ collector_names:
     - vllm_zmq
     - vllm_metrics
     - sticky_stat
+    - inflight_stat

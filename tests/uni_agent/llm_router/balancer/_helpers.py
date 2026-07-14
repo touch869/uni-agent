@@ -64,7 +64,7 @@ def _router_config(weight: float = 1.0):
                 {
                     "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
                     "weight": weight,
-                    "collector_names": ["vllm_zmq", "sticky_stat"],
+                    "collector_names": ["vllm_zmq", "sticky_stat", "inflight_stat"],
                 },
             ],
         }

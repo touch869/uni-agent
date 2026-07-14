@@ -928,3 +928,56 @@ class TestDefaultWeights:
     def test_default_weights_tuple(self):
         assert DEFAULT_LOAD_WEIGHTS == (0.4, 0.3, 0.3)
         assert sum(DEFAULT_LOAD_WEIGHTS) == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------- #
+# USE_VERL_STICKY env-var mode (verl-default: sticky skips overload + least-inflight)
+# --------------------------------------------------------------------------- #
+class TestVerlDefaultMode:
+    """``USE_VERL_STICKY`` flips verl-default mode: sticky hit ignores overload and
+    the fallback becomes least-inflight (mirrors verl GlobalRequestLoadBalancer)."""
+
+    def test_sticky_hit_ignores_overload(self, monkeypatch):
+        """verl: bound replica wins even when saturated (no overload check)."""
+        monkeypatch.setenv("USE_VERL_STICKY", "1")
+        strat = _strat(load_threshold=0.9)
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 1000},
+                "rep_b": {"kv_cache_usage_perc": 0.3},
+            },
+            sticky={"r1": "rep_a"},
+        )
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        assert ranking[0] == "rep_a"  # sticky wins despite load≈1.0
+
+    def test_miss_routes_to_least_inflight(self, monkeypatch):
+        """verl fallback: pick the replica with the fewest in-flight requests."""
+        monkeypatch.setenv("USE_VERL_STICKY", "1")
+        strat = _strat()
+        provider = FakeRouteDataProvider(
+            {"rep_a": {"inflight_count": 5}, "rep_b": {"inflight_count": 2}},
+        )
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        assert ranking[0] == "rep_b"
+
+    def test_stale_binding_falls_back_to_least_inflight(self, monkeypatch):
+        """verl: bound replica no longer in pool → least-inflight fallback."""
+        monkeypatch.setenv("USE_VERL_STICKY", "1")
+        strat = _strat()
+        provider = FakeRouteDataProvider(
+            {"rep_a": {"inflight_count": 5}, "rep_b": {"inflight_count": 1}},
+            sticky={"r1": "rep_gone"},
+        )
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        assert ranking[0] == "rep_b"
+
+    def test_inflight_tie_keeps_pool_order(self, monkeypatch):
+        """verl tie-break: equal inflight → first replica in pool order."""
+        monkeypatch.setenv("USE_VERL_STICKY", "1")
+        strat = _strat()
+        provider = FakeRouteDataProvider(
+            {"rep_a": {"inflight_count": 3}, "rep_b": {"inflight_count": 3}},
+        )
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        assert ranking[0] == "rep_a"

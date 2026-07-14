@@ -41,3 +41,17 @@ def _conditional_patch(request):
     _collectors_mod.CollectorManager = _orig_provider
     KVCAwareBalancer._init_manager = _orig_init
     KVCAwareBalancer._resolve_max_num_seqs = _orig_resolve
+
+
+@pytest.fixture(autouse=True)
+def _reset_store_singletons():
+    """Reset the singleton-backed stores between balancer tests (function-scoped)."""
+    from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
+    from uni_agent.llm_router.store.metrics_store import MetricsStore
+    from uni_agent.llm_router.store.sticky_session_store import StickySessionStore
+
+    for cls in (MetricsStore, KVCacheStore, StickySessionStore):
+        cls._instance = None
+    yield
+    for cls in (MetricsStore, KVCacheStore, StickySessionStore):
+        cls._instance = None

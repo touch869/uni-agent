@@ -44,19 +44,6 @@ def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
 class TestStickyEndToEnd:
     """Real KVCacheAwareStrategy + real route() + real sticky_stat collector."""
 
-    @pytest.fixture(autouse=True)
-    def _reset_singletons(self):
-        """Isolate each test from the singleton-backed stores."""
-        from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
-        from uni_agent.llm_router.store.metrics_store import MetricsStore
-        from uni_agent.llm_router.store.sticky_session_store import StickySessionStore
-
-        for cls in (MetricsStore, KVCacheStore, StickySessionStore):
-            cls._instance = None
-        yield
-        for cls in (MetricsStore, KVCacheStore, StickySessionStore):
-            cls._instance = None
-
     def _make_balancer(self, servers, metrics):
         """Build a balancer and seed its real DataStore with per-replica metrics."""
         balancer = KVCAwareBalancer(servers, _router_config())

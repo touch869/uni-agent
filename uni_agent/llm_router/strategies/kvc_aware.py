@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
@@ -77,9 +78,12 @@ class KVCacheAwareStrategy:
         self.weight = weight
         self.load_weights = tuple(load_weights)
         self._max_num_seqs: int | None = None
+        # USE_VERL_STICKY=1 → verl-default mode (test-only; not a config field).
+        self._use_verl = os.environ.get("USE_VERL_STICKY", "").lower() in ("1", "true", "yes")
         logger.info(
             f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, "
-            f"load_threshold={self.load_threshold:.2f}, load_weights={self.load_weights}"
+            f"load_threshold={self.load_threshold:.2f}, load_weights={self.load_weights}, "
+            f"USE_VERL_STICKY={self._use_verl}"
         )
 
     def set_capacity(self, max_num_seqs: int) -> None:
@@ -131,11 +135,11 @@ class KVCacheAwareStrategy:
     ) -> list[float] | None:
         """Return a pre-built score list if a sticky replica should win, else None.
 
-        Sticky replica wins when: ``request_id`` is provided, the bound replica
-        (read from ``store.get_sticky_binding``) is present in ``replicas``, and
-        it is NOT overloaded. On win, returns a list with ``STICKY_TOP_SCORE``
-        at the bound replica's index and ``0.0`` elsewhere. On miss / overload /
-        absence, returns ``None`` so the caller falls through to combined scoring.
+        Sticky wins when ``request_id`` is provided and the bound replica (from
+        ``store.get_sticky_binding``) is present in ``replicas``. In KVCAware mode
+        it must also NOT be overloaded; in verl mode (``USE_VERL_STICKY``) the
+        overload check is skipped. On win, returns a list with ``STICKY_TOP_SCORE``
+        at the bound index and ``0.0`` elsewhere; else ``None`` (fall through).
         """
         if not request_id:
             return None
@@ -144,19 +148,14 @@ class KVCacheAwareStrategy:
             return None
         for idx, replica in enumerate(replicas):
             if replica.replica_id == sticky_id:
-                m = store.get_metrics(replica.replica_id)
-                kv_usage = store.kv_cache_load(replica.replica_id)
-                running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
-                waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-                load = self._compute_load(kv_usage, running, waiting)
-                if load > self.load_threshold:
-                    logger.info(f"score(): STICKY replica={sticky_id} OVERLOADED → fallback to COMBINED scoring")
+                if not self._use_verl and self.is_overloaded(store, replica):
+                    logger.info(f"score(): STICKY replica={sticky_id} OVERLOADED → fallback")
                     return None
                 logger.info(f"score(): STICKY replica={sticky_id} HIT → short-circuit (top score)")
                 scores = [0.0] * len(replicas)
                 scores[idx] = STICKY_TOP_SCORE
                 return scores
-        logger.info(f"score(): sticky replica={sticky_id} not in pool, fallback to combined scoring")
+        logger.info(f"score(): sticky replica={sticky_id} not in pool → fallback")
         return None
 
     def score(
@@ -168,16 +167,20 @@ class KVCacheAwareStrategy:
     ) -> list[float]:
         """Score each replica. Larger is better.
 
-        S = α·S_cache + (1-α)·S_load
+        KVCAware mode: ``S = α·S_cache + (1-α)·S_load`` after the sticky
+        short-circuit. verl mode (``USE_VERL_STICKY``): least-inflight fallback
+        (``-INFLIGHT_COUNT``) after an overload-agnostic sticky short-circuit.
         """
         if not isinstance(replicas, list):
             raise StrategyError(f"replicas must be a list, got {type(replicas).__name__}")
         if not replicas:
             return []
-        # Sticky short-circuit: bound, non-overloaded replica wins outright.
+        # Sticky short-circuit.
         shortcut = self._sticky_shortcut(store, replicas, request_id)
         if shortcut is not None:
             return shortcut
+        if self._use_verl:
+            return [-store.get_metric(r.replica_id, MetricKey.INFLIGHT_COUNT) for r in replicas]
         effective_prompt_ids = prompt_ids or []
 
         result = []
