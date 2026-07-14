@@ -8,7 +8,7 @@ import threading
 from collections import defaultdict
 from concurrent.futures import Future
 
-from uni_agent.llm_router.collectors.decoder import Decoder, KVCacheUpdate, MetricsUpdate
+from uni_agent.llm_router.collectors.decoder import Decoder, KVCacheUpdate, MetricsUpdate, StickyUpdate
 from uni_agent.llm_router.collectors.transport.base import Transport
 from uni_agent.llm_router.config.collector import CollectorConfig
 from uni_agent.llm_router.logging import get_router_logger
@@ -95,24 +95,36 @@ class Collector:
         def handler(raw_data: bytes | str, node_id: str) -> None:
             """Handler: decode and dispatch to the right store write path."""
             result = self._decoder.decode(raw_data, node_id)
-            if result is None:
-                logger.warning("the return of decoder.decode is None.")
-                return
             if isinstance(result, KVCacheUpdate):
                 self._write_kv_update(result)
             elif isinstance(result, MetricsUpdate):
                 self._write_metrics_update(result)
+            elif isinstance(result, StickyUpdate):
+                self._write_sticky_update(result)
+            else:
+                # None is normal for statistic decoders that skip an event
+                # (e.g. StickyDecoder on_release); demote to debug to avoid per-turn noise.
+                logger.debug("decoder.decode returned no update: %r", result)
 
-        self._loop_thread = threading.Thread(
-            target=run_loop,
-            daemon=True,
-        )
-        self._loop_thread.start()
+        if getattr(self._transport, "is_async", True):
+            self._loop_thread = threading.Thread(
+                target=run_loop,
+                daemon=True,
+            )
+            self._loop_thread.start()
 
-        self._future = asyncio.run_coroutine_threadsafe(
-            self._transport.subscribe(handler),
-            self._loop,
-        )
+            self._future = asyncio.run_coroutine_threadsafe(
+                self._transport.subscribe(handler),
+                self._loop,
+            )
+        else:
+            # CallbackTransport: subscribe only registers callbacks — run it on a
+            # throwaway loop; stop() just unregisters.
+            tmp_loop = asyncio.new_event_loop()
+            try:
+                tmp_loop.run_until_complete(self._transport.subscribe(handler))
+            finally:
+                tmp_loop.close()
 
     def _write_kv_update(self, update: KVCacheUpdate) -> None:
         """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""
@@ -148,7 +160,16 @@ class Collector:
             )
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
-        """Write MetricsUpdate via DataStore, then emit a periodic evidence log."""
+        """Write MetricsUpdate via DataStore, then emit a periodic evidence log.
+
+        Delta updates (``is_delta=True``, from ``InflightDecoder``) route to
+        ``incr_metric`` and skip the evidence log — they are signed counter
+        deltas (±1), not polled gauges.
+        """
+        if update.is_delta:
+            for key, delta in update.metrics.items():
+                self._data_store.incr_metric(update.node_id, key, delta)
+            return
         self._data_store.refresh_metrics({update.node_id: update.metrics})
 
         # Periodic visibility into what the collector fed the router — compare
@@ -163,6 +184,18 @@ class Collector:
             # ``_metrics_prev`` baseline, so windowed deltas stay correct.
             for nid in self._data_store.get_metric_node_ids():
                 self._log_evidence_window(nid)
+
+    def _write_sticky_update(self, update: StickyUpdate) -> None:
+        """Apply a StickyUpdate to the sticky-session store via DataStore."""
+        if update.action == "put":
+            self._data_store.put_sticky_binding(update.request_id, update.replica_id)
+        elif update.action == "invalidate":
+            self._data_store.invalidate_sticky_binding(update.request_id)
+        elif update.action == "invalidate_replica":
+            for rid in update.replica_ids:
+                self._data_store.invalidate_sticky_replica(rid)
+        else:
+            logger.warning(f"unknown StickyUpdate action: {update.action}")
 
     def _log_evidence_window(self, node_id: str) -> None:
         """Emit a windowed evidence summary for one replica.
@@ -268,6 +301,7 @@ def get_collector(
     collectors_config: CollectorConfig,
     server_addresses: dict[str, str] | None = None,
     kv_event_endpoints: dict[str, list[str]] | None = None,
+    balancer_handler=None,
 ) -> Collector:
     """Create a Collector by name — one place does both composition and config binding.
 
@@ -311,4 +345,19 @@ def get_collector(
         )
         return Collector(transport, VLLMKVDecoder())
 
-    raise ValueError(f"Unknown collector: '{name}'. Available: ['vllm_metrics', 'vllm_zmq']")
+    if name == "sticky_stat":
+        from uni_agent.llm_router.collectors.decoder.basic.sticky import StickyDecoder
+        from uni_agent.llm_router.collectors.transport.callback import CallbackTransport
+
+        return Collector(CallbackTransport(balancer_handler), StickyDecoder())
+
+    if name == "inflight_stat":
+        from uni_agent.llm_router.collectors.decoder.basic.inflight import InflightDecoder
+        from uni_agent.llm_router.collectors.transport.callback import CallbackTransport
+
+        return Collector(CallbackTransport(balancer_handler), InflightDecoder())
+
+    raise ValueError(
+        f"Unknown collector: '{name}'. "
+        "Available: ['vllm_metrics', 'vllm_zmq', 'sticky_stat', 'inflight_stat']"
+    )

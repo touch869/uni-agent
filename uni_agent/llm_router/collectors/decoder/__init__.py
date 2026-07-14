@@ -4,6 +4,7 @@ from uni_agent.llm_router.collectors.decoder.base import (
     Decoder,
     KVCacheUpdate,
     MetricsUpdate,
+    StickyUpdate,
 )
 
-__all__ = ["Decoder", "KVCacheUpdate", "MetricsUpdate"]
+__all__ = ["Decoder", "KVCacheUpdate", "MetricsUpdate", "StickyUpdate"]

@@ -10,3 +10,4 @@ layer_weights:
 collector_names:
     - vllm_zmq
     - vllm_metrics
+    - sticky_stat

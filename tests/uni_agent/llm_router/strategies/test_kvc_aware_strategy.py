@@ -19,7 +19,6 @@ import pytest
 from uni_agent.llm_router.strategies import (
     KVCacheAwareStrategy,
     RoutingStrategy,
-    StickySessionTable,
     StrategyError,
     route,
 )
@@ -78,8 +77,15 @@ class FakeRouteDataProvider:
       tiers                – dict mapping tier name to hit rate (default {})
     """
 
-    def __init__(self, data: dict[str, dict]):
+    def __init__(self, data: dict[str, dict], sticky: dict[str, str] | None = None):
         self._data = data
+        self._sticky = sticky or {}
+
+    def get_sticky_binding(self, request_id: str) -> str | None:
+        return self._sticky.get(request_id)
+
+    def put_sticky_binding(self, request_id: str, replica_id: str) -> None:
+        self._sticky[request_id] = replica_id
 
     def get_metric(self, replica_id: str, key: str) -> float | int:
         entry = self._data.get(replica_id, {})
@@ -782,9 +788,9 @@ class TestStickyShortCircuit:
     replica is genuinely saturated (kv≈1, running≈max_num_seqs, big backlog).
     """
 
-    def _provider(self, **per_replica):
-        """Build a FakeRouteDataProvider from {rep_id: metrics_dict}."""
-        return FakeRouteDataProvider(per_replica)
+    def _provider(self, sticky=None, **per_replica):
+        """Build a FakeRouteDataProvider from {rep_id: metrics_dict} + optional sticky."""
+        return FakeRouteDataProvider(per_replica, sticky=sticky)
 
     # ── is_overloaded ──────────────────────────────────────────────────────
     def test_is_overloaded_true_when_saturated(self):
@@ -816,15 +822,14 @@ class TestStickyShortCircuit:
         """
         strat = _strat(load_threshold=0.9)
         provider = self._provider(
+            sticky={"r1": "rep_b"},
             rep_a={"kv_cache_usage_perc": 0.2, "num_requests_running": 0, "gpu_hit_pct": 80},
             rep_b={"kv_cache_usage_perc": 0.3, "num_requests_running": 0, "gpu_hit_pct": 0},
         )
         replicas = _replicas("rep_a", "rep_b")
-        sticky = StickySessionTable()
-        sticky.put("r1", "rep_b")
-        scores = strat.score(PROMPT_IDS, provider, replicas, "r1", sticky)
+        scores = strat.score(PROMPT_IDS, provider, replicas, "r1")
         assert scores == [0.0, STICKY_TOP_SCORE]
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1", sticky)
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1")
         assert ranking[0] == "rep_b"
 
     def test_sticky_hit_overloaded_falls_back_to_combined(self):
@@ -835,6 +840,7 @@ class TestStickyShortCircuit:
         """
         strat = _strat(load_threshold=0.9)
         provider = self._provider(
+            sticky={"r1": "rep_b"},
             rep_a={"kv_cache_usage_perc": 0.2, "num_requests_running": 0, "gpu_hit_pct": 80},
             rep_b={
                 "kv_cache_usage_perc": 1.0,
@@ -844,9 +850,7 @@ class TestStickyShortCircuit:
             },
         )
         replicas = _replicas("rep_a", "rep_b")
-        sticky = StickySessionTable()
-        sticky.put("r1", "rep_b")
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1", sticky)
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1")
         assert ranking[0] == "rep_a"
 
     def test_sticky_no_binding_cold_start_combined(self):
@@ -859,8 +863,7 @@ class TestStickyShortCircuit:
             rep_b={"kv_cache_usage_perc": 0.3, "num_requests_running": 0, "gpu_hit_pct": 0},
         )
         replicas = _replicas("rep_a", "rep_b")
-        sticky = StickySessionTable()
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1", sticky)
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1")
         assert ranking[0] == "rep_a"
 
     def test_sticky_bound_replica_removed_falls_back(self):
@@ -869,13 +872,12 @@ class TestStickyShortCircuit:
         """
         strat = _strat(load_threshold=0.9)
         provider = self._provider(
+            sticky={"r1": "rep_gone"},  # bound replica not in pool
             rep_a={"kv_cache_usage_perc": 0.2, "num_requests_running": 0, "gpu_hit_pct": 80},
             rep_b={"kv_cache_usage_perc": 0.3, "num_requests_running": 0, "gpu_hit_pct": 0},
         )
         replicas = _replicas("rep_a", "rep_b")
-        sticky = StickySessionTable()
-        sticky.put("r1", "rep_gone")  # bound replica not in pool
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1", sticky)
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1")
         assert ranking[0] == "rep_a"
 
     def test_sticky_none_request_id_combined(self):
@@ -888,7 +890,7 @@ class TestStickyShortCircuit:
             rep_b={"kv_cache_usage_perc": 0.3, "num_requests_running": 0, "gpu_hit_pct": 0},
         )
         replicas = _replicas("rep_a", "rep_b")
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, None, None)
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, None)
         assert ranking[0] == "rep_a"
 
 

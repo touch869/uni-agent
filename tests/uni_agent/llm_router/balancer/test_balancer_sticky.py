@@ -1,7 +1,17 @@
+"""Sticky-session end-to-end with the REAL sticky_stat collector (no mocking).
+
+``_router_config`` lists ``sticky_stat`` in ``collector_names``, so the patched
+``_FakeCollectorManager`` builds a real ``Collector(CallbackTransport(self),
+StickyDecoder)`` that registers ``on_acquire`` / ``on_servers_removed`` on the
+Balancer — exactly the production path. The test does NOT register callbacks by
+hand; it only injects metrics into the real ``DataStore`` and asserts routing
+behaviour. This is the test that proves the Phase-1 statistic chain works
+outside the unit-test seam.
+"""
+
 from __future__ import annotations
 
 import pytest
-from omegaconf import OmegaConf
 
 from uni_agent.llm_router.balancer import KVCAwareBalancer
 from uni_agent.llm_router.types import MetricKey
@@ -13,50 +23,13 @@ from ._helpers import (
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
-# ============================================================
-# Sticky-session end-to-end (real strategy, no route monkeypatch)
-# ============================================================
-
-
-class _MetricsProvider:
-    """Metrics-aware fake provider for sticky e2e tests.
-
-    Configured per-replica metrics; returns real KV/load numbers so the real
-    KVCacheAwareStrategy can compute s_load and decide overload + stickiness.
-    get_layer_prefix_hit_rate returns 0.0 → combined scoring degrades to
-    load-only (no cache term), which is fine for sticky behavior: the deciding
-    factor is whether the bound replica is overloaded.
-    """
-
-    def __init__(self, metrics: dict[str, dict] | None = None):
-        self._metrics = metrics or {}
-
-    def start(self):
-        pass
-
-    def stop(self):
-        pass
-
-    def get_metrics(self, replica_id):
-        return dict(self._metrics.get(replica_id, {}))
-
-    def get_metric(self, replica_id, key):
-        return self.get_metrics(replica_id).get(key, 0.0)
-
-    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
-        return 0.0
-
-    def kv_cache_load(self, replica_id):
-        # Unit tests key the load signal on kv_cache_usage_perc (no kv-events /
-        # retained blocks simulated); mirror it so overload detection works.
-        return self.get_metric(replica_id, MetricKey.KV_CACHE_USAGE_PERC)
-
-
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
     """Normalize {sid: {kv, running, waiting}} into MetricKey-keyed dicts.
 
-    Defaults: kv=0.3 (→ load=0.12, NOT overloaded under load_threshold 0.9),
-    running=0, waiting=0.
+    Defaults: kv=0.3, running=0, waiting=0 (light load). NOTE: ``kv`` here sets
+    ``KV_CACHE_USAGE_PERC``; the load formula actually uses ``kv_cache_load``
+    (retained_blocks/num_gpu_blocks), which tests drive via ``add_kv_blocks`` +
+    ``NUM_GPU_BLOCKS`` when they need overload.
     """
     out = {}
     for sid, m in per_replica.items():
@@ -69,32 +42,34 @@ def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
 
 
 class TestStickyEndToEnd:
-    """Real KVCacheAwareStrategy + real route(): sticky affinity across turns."""
+    """Real KVCacheAwareStrategy + real route() + real sticky_stat collector."""
 
-    def _make_balancer_with_metrics(self, servers, metrics):
-        """Build a balancer whose provider returns the given per-replica metrics."""
+    @pytest.fixture(autouse=True)
+    def _reset_singletons(self):
+        """Isolate each test from the singleton-backed stores."""
+        from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
+        from uni_agent.llm_router.store.metrics_store import MetricsStore
+        from uni_agent.llm_router.store.sticky_session_store import StickySessionStore
 
-        provider = _MetricsProvider(metrics)
+        for cls in (MetricsStore, KVCacheStore, StickySessionStore):
+            cls._instance = None
+        yield
+        for cls in (MetricsStore, KVCacheStore, StickySessionStore):
+            cls._instance = None
 
-        def fake_init(self):
-            self._manager = provider
-            self._store = provider  # _MetricsProvider doubles as the DataStore
-
-        orig = KVCAwareBalancer._init_manager
-        KVCAwareBalancer._init_manager = fake_init
-        try:
-            return KVCAwareBalancer(servers, _router_config())
-        finally:
-            KVCAwareBalancer._init_manager = orig
+    def _make_balancer(self, servers, metrics):
+        """Build a balancer and seed its real DataStore with per-replica metrics."""
+        balancer = KVCAwareBalancer(servers, _router_config())
+        balancer._store.refresh_metrics(metrics)
+        return balancer
 
     def test_second_turn_same_request_stays_sticky(self):
         """Feature: bound + not overloaded → second turn routes to same server.
-        Description: turn1 acquires (cold start, picks some server); turn2 same
+        Description: turn1 acquires (cold start, tie-break picks s0); turn2 same
         request_id with that server still healthy must return the SAME server.
-        Expectation: turn1.sid == turn2.sid (sticky hit)
+        Expectation: turn1.sid == turn2.sid (sticky hit via real sticky_stat collector)
         """
-        # s0/s1 both healthy (kv=0.3 → load=0.12, not overloaded)
-        balancer = self._make_balancer_with_metrics(
+        balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},
             _kv_metrics({"s0": {}, "s1": {}}),
         )
@@ -102,85 +77,52 @@ class TestStickyEndToEnd:
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid1 == sid2
 
-    def test_overloaded_sticky_falls_back_to_healthy(self, monkeypatch):
+    def test_overloaded_sticky_falls_back_to_healthy(self):
         """Feature: bound replica becomes saturated (load>0.9) → rebind to a healthy one.
-        Description: turn1 binds r1→s0; then s0 saturated (kv=1,r=64,w=1000 → load≈0.98),
-        s1 healthy (kv=0.3 → load=0.12).
+        Description: turn1 binds r1→s0; then s0 saturated (kv_load=1.0 via
+        retained=10/num_gpu_blocks=10, running=64, waiting=1000 → load=1.0),
+        s1 healthy (kv_load=0 → load=0).
         Expectation: turn2 routes to s1 (not the saturated s0), and rebinds r1→s1
         """
-        monkeypatch.setenv("MAX_NUM_SEQS", "64")  # pin the load formula's running term
-        # turn1: both healthy, cold start
-        balancer = self._make_balancer_with_metrics(
+        balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},
             _kv_metrics({"s0": {}, "s1": {}}),
         )
         sid1, _ = balancer.acquire_server("r1", [1, 2])
-        # mutate metrics: s0 now saturated (load>0.9), s1 healthy
-        balancer._store._metrics = _kv_metrics(
-            {
-                "s0": {"kv": 1.0, "running": 64, "waiting": 1000},
-                "s1": {"kv": 0.3},
-            }
+        # saturate s0: kv_load=1.0 (retained/num_gpu_blocks) + running/waiting maxed
+        balancer._store.refresh_metrics(
+            _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000}, "s1": {"kv": 0.3}})
         )
+        balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
+        balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid2 == "s1", f"expected fallback to s1, got {sid2} (turn1 was {sid1})"
 
     def test_removed_sticky_server_reselects(self):
         """Feature: bound server removed → reselect from remaining pool.
-        Description: turn1 binds r1→s0; remove s0; turn2 must pick from {s1,s2}.
+        Description: turn1 binds r1→s0; remove s0 (fires on_servers_removed →
+        sticky invalidate_replica); turn2 must pick from {s1,s2}.
         Expectation: turn2 sid in {s1,s2}, no crash, sticky rebound
         """
-        balancer = self._make_balancer_with_metrics(
+        balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1", "s2": "h2"},
             _kv_metrics({"s0": {}, "s1": {}, "s2": {}}),
         )
-        sid1, _ = balancer.acquire_server("r1", [1, 2])
+        balancer.acquire_server("r1", [1, 2])
         balancer.remove_servers(["s0"])
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid2 in {"s1", "s2"}
-        # sticky binding to s0 should have been invalidated
-        assert balancer._sticky.get("r1") in {"s1", "s2"}
+        assert balancer._store.get_sticky_binding("r1") in {"s1", "s2"}
 
     def test_get_status_reports_sticky_size(self):
         """Feature: get_status() includes sticky_size.
         Description: acquire two distinct request_ids; check status
         Expectation: sticky_size == 2
         """
-        balancer = self._make_balancer_with_metrics(
+        balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},
             _kv_metrics({"s0": {}, "s1": {}}),
         )
         balancer.acquire_server("r1", [1])
         balancer.acquire_server("r2", [1])
-        status = balancer.get_status()
-        assert status["sticky_size"] == 2
-
-    def test_sticky_respects_configured_max_size(self):
-        """Feature: KVCAwareConfig.sticky_max_size flows to the sticky table.
-        Description: build a balancer with sticky_max_size overridden in config
-        Expectation: balancer._sticky.max_size == overridden value
-        """
-        cfg = OmegaConf.create(
-            {
-                "router_class": "uni_agent.llm_router.balancer.KVCAwareBalancer",
-                "sticky_max_size": 42,
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-            }
-        )
-        orig = KVCAwareBalancer._init_manager
-        KVCAwareBalancer._init_manager = lambda self: setattr(
-            self,
-            "_manager",
-            _MetricsProvider(_kv_metrics({"s0": {}})),
-        )
-        try:
-            balancer = KVCAwareBalancer({"s0": "h0"}, cfg)
-            assert balancer._sticky.max_size == 42
-        finally:
-            KVCAwareBalancer._init_manager = orig
+        assert balancer.get_status()["sticky_size"] == 2

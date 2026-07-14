@@ -30,7 +30,7 @@ class TestKVCAwareBalancerConstruction:
         """
         balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
         assert balancer._manager.started is True
-        assert balancer._manager.collection_names == ["vllm_zmq"]
+        assert balancer._manager.collection_names == ["sticky_stat", "vllm_zmq"]
         assert len(balancer._strategies) == 1
         strat, weight = balancer._strategies[0]
         assert isinstance(strat, KVCacheAwareStrategy)

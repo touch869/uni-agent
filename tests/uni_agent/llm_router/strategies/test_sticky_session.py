@@ -1,32 +1,33 @@
-"""Tests for StickySessionTable — request_id → replica_id LRU mapping.
+"""Tests for StickySessionStore — request_id → replica_id LRU mapping.
 
-Covers the sticky-session affinity table the Balancer owns and threads into
-``route()`` → ``strategy.score()``. Mirrors verl ``GlobalRequestLoadBalancer``
-sticky semantics: access refreshes recency, LRU evicts cold entries, replica
-removal bulk-clears stale bindings.
+Covers the sticky-session affinity store (sunk out of the Balancer into the
+store layer). Mirrors verl ``GlobalRequestLoadBalancer`` sticky semantics:
+access refreshes recency, LRU evicts cold entries, replica removal bulk-clears
+stale bindings. Tests construct plain instances (not the singleton) so each is
+isolated.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from uni_agent.llm_router.strategies.sticky_session import (
+from uni_agent.llm_router.store.sticky_session_store import (
     DEFAULT_STICKY_MAX_SIZE,
-    StickySessionTable,
+    StickySessionStore,
 )
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
-class TestStickySessionTable:
-    """S01-Snn: StickySessionTable construction + access semantics."""
+class TestStickySessionStore:
+    """S01-Snn: StickySessionStore construction + access semantics."""
 
     def test_s01_get_missing_returns_none(self):
         """Feature: cold-start get returns None (no binding yet).
         Description: get() on an empty table for any request_id
         Expectation: returns None
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         assert t.get("r1") is None
 
     def test_s02_put_then_get_returns_replica(self):
@@ -34,7 +35,7 @@ class TestStickySessionTable:
         Description: put("r1","s0"); get("r1")
         Expectation: returns "s0"
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         t.put("r1", "s0")
         assert t.get("r1") == "s0"
         assert len(t) == 1
@@ -44,7 +45,7 @@ class TestStickySessionTable:
         Description: put("r1","s0"); put("r1","s1"); get("r1")
         Expectation: returns "s1" (overload-fallback routed elsewhere)
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         t.put("r1", "s0")
         t.put("r1", "s1")
         assert t.get("r1") == "s1"
@@ -55,7 +56,7 @@ class TestStickySessionTable:
         Description: fill to max_size=2; touch r1; add r3; r1 still present, r2 evicted
         Expectation: r1 bound, r2 None (r2 was coldest)
         """
-        t = StickySessionTable(max_size=2)
+        t = StickySessionStore(max_size=2)
         t.put("r1", "s0")
         t.put("r2", "s1")
         # touch r1 so r2 becomes the coldest
@@ -70,7 +71,7 @@ class TestStickySessionTable:
         Description: max_size=2; put r1,r2,r3 in order
         Expectation: r1 evicted (coldest), r2/r3 bound
         """
-        t = StickySessionTable(max_size=2)
+        t = StickySessionStore(max_size=2)
         t.put("r1", "s0")
         t.put("r2", "s1")
         t.put("r3", "s2")  # evicts r1
@@ -83,7 +84,7 @@ class TestStickySessionTable:
         Description: put r1,s0; invalidate r1; get r1
         Expectation: get returns None, len 0
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         t.put("r1", "s0")
         t.invalidate("r1")
         assert t.get("r1") is None
@@ -94,7 +95,7 @@ class TestStickySessionTable:
         Description: invalidate("rX") on empty table
         Expectation: no error, len 0
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         t.invalidate("rX")  # must not raise
         assert len(t) == 0
 
@@ -103,7 +104,7 @@ class TestStickySessionTable:
         Description: r1→s0, r2→s1, r3→s0; invalidate_replica("s0")
         Expectation: r1/r3 gone, r2 still bound
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         t.put("r1", "s0")
         t.put("r2", "s1")
         t.put("r3", "s0")
@@ -117,7 +118,7 @@ class TestStickySessionTable:
         Description: no bindings point to sX; invalidate_replica("sX")
         Expectation: no error, table unchanged
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         t.put("r1", "s0")
         t.invalidate_replica("sX")
         assert t.get("r1") == "s0"
@@ -128,7 +129,7 @@ class TestStickySessionTable:
         Description: max_size=5; put 2 entries; status()
         Expectation: {"max_size": 5, "size": 2}
         """
-        t = StickySessionTable(max_size=5)
+        t = StickySessionStore(max_size=5)
         t.put("r1", "s0")
         t.put("r2", "s1")
         s = t.status()
@@ -136,18 +137,32 @@ class TestStickySessionTable:
 
     def test_s11_default_max_size_matches_verl(self):
         """Feature: default max_size is 10000 (verl DEFAULT_ROUTING_CACHE_SIZE).
-        Description: StickySessionTable() with no args
+        Description: StickySessionStore() with no args
         Expectation: max_size == 10000
         """
-        t = StickySessionTable()
+        t = StickySessionStore()
         assert t.max_size == DEFAULT_STICKY_MAX_SIZE == 10000
 
     def test_s12_invalid_max_size_raises(self):
         """Feature: max_size <= 0 raises ValueError.
-        Description: StickySessionTable(max_size=0) and (-1)
+        Description: StickySessionStore(max_size=0) and (-1)
         Expectation: both raise ValueError
         """
         with pytest.raises(ValueError):
-            StickySessionTable(max_size=0)
+            StickySessionStore(max_size=0)
         with pytest.raises(ValueError):
-            StickySessionTable(max_size=-1)
+            StickySessionStore(max_size=-1)
+
+    def test_s13_singleton_returns_shared_instance(self):
+        """Feature: singleton() returns the shared instance at the fixed capacity.
+        Description: reset singleton; singleton(); singleton() again
+        Expectation: both calls return the same instance, max_size == DEFAULT
+        """
+        StickySessionStore._instance = None
+        try:
+            first = StickySessionStore.singleton()
+            second = StickySessionStore.singleton()
+            assert first is second
+            assert first.max_size == DEFAULT_STICKY_MAX_SIZE
+        finally:
+            StickySessionStore._instance = None  # don't leak into other tests

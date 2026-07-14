@@ -48,6 +48,8 @@ class MetricKey:
     EXTERNAL_PREFIX_CACHE_HITS: str = "external_prefix_cache_hits"
     # Estimated FLOPs per GPU (vLLM analytic counter; MFU = rate(flops) / peak_flops).
     ESTIMATED_FLOPS_PER_GPU: str = "estimated_flops_per_gpu"
+    # In-flight request count (acquire +1 / release -1, mirrors verl least-inflight).
+    INFLIGHT_COUNT: str = "inflight_count"
 
 
 # ── Metric definitions (single source of truth) ──────────────────────
@@ -140,5 +142,10 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
         "default": 0,
         "value_type": int,
         "describe": "Cumul. estimated FLOPs per GPU (vLLM analytic; MFU = rate / peak_flops)",
+    },
+    MetricKey.INFLIGHT_COUNT: {
+        "default": 0,
+        "value_type": int,
+        "describe": "In-flight request count (acquire +1 / release -1, verl least-inflight signal)",
     },
 }

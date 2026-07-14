@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 from uni_agent.llm_router.logging import get_router_logger
@@ -128,19 +128,18 @@ class KVCacheAwareStrategy:
         store: DataStore,
         replicas: list[ReplicaInfo],
         request_id: str | None,
-        sticky_table: Any,
     ) -> list[float] | None:
         """Return a pre-built score list if a sticky replica should win, else None.
 
-        Sticky replica wins when: ``request_id``/``sticky_table`` are provided,
-        the bound replica is present in ``replicas``, and it is NOT overloaded.
-        On win, returns a list with ``STICKY_TOP_SCORE`` at the bound replica's
-        index and ``0.0`` elsewhere. On miss / overload / absence, returns
-        ``None`` so the caller falls through to combined scoring.
+        Sticky replica wins when: ``request_id`` is provided, the bound replica
+        (read from ``store.get_sticky_binding``) is present in ``replicas``, and
+        it is NOT overloaded. On win, returns a list with ``STICKY_TOP_SCORE``
+        at the bound replica's index and ``0.0`` elsewhere. On miss / overload /
+        absence, returns ``None`` so the caller falls through to combined scoring.
         """
-        if not request_id or sticky_table is None:
+        if not request_id:
             return None
-        sticky_id = sticky_table.get(request_id)
+        sticky_id = store.get_sticky_binding(request_id)
         if sticky_id is None:
             return None
         for idx, replica in enumerate(replicas):
@@ -166,7 +165,6 @@ class KVCacheAwareStrategy:
         store: DataStore,
         replicas: list[ReplicaInfo],
         request_id: str | None = None,
-        sticky_table: Any = None,
     ) -> list[float]:
         """Score each replica. Larger is better.
 
@@ -177,7 +175,7 @@ class KVCacheAwareStrategy:
         if not replicas:
             return []
         # Sticky short-circuit: bound, non-overloaded replica wins outright.
-        shortcut = self._sticky_shortcut(store, replicas, request_id, sticky_table)
+        shortcut = self._sticky_shortcut(store, replicas, request_id)
         if shortcut is not None:
             return shortcut
         effective_prompt_ids = prompt_ids or []

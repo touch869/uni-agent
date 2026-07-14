@@ -49,6 +49,28 @@ class MetricsStore:
             return node[key]
         return METRIC_SPECS[key]["default"]
 
+    def incr(self, node_id: str, key: str, delta: int | float = 1) -> None:
+        """Apply a numeric delta to one key for one node (inflight ±1).
+
+        Unlike ``refresh`` (batch merge overwrite), this is an incremental
+        write: it reads the current value (falling back to the spec default)
+        and stores ``current + delta``. Keeps the writer (decoder) stateless
+        — it only emits the +/-1 delta; the store owns the running counter.
+
+        Args:
+            node_id: Target node.
+            key: Canonical metric key (must be in ``METRIC_SPECS``).
+            delta: Signed delta to add (default +1).
+
+        Raises:
+            KeyError: If ``key`` is not a valid canonical key.
+        """
+        if key not in METRIC_SPECS:
+            raise KeyError(f"Unknown metric key '{key}'. Valid keys: {sorted(METRIC_SPECS.keys())}")
+        with self._lock:
+            node = self._data.setdefault(node_id, {})
+            node[key] = node.get(key, METRIC_SPECS[key]["default"]) + delta
+
     def refresh(self, new_data: dict[str, dict[str, Any]]) -> None:
         """Batch refresh from collectors.
 

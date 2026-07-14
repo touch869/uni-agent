@@ -1,7 +1,7 @@
 """Helpers for balancer unit tests.
 
-Defines ``FakeDataStore`` (query stub), ``_FakeCollectorManager`` (lifecycle
-stub), and helper functions.  Patching is done by ``conftest.py`` via a
+Defines ``_FakeCollectorManager`` (real statistic collectors + stubbed network
+collectors) and helper functions. Patching is done by ``conftest.py`` via a
 session-scoped autouse fixture (``_conditional_patch``) that only fires when
 balancer ut tests are selected, so it never leaks to Ray workers in other test
 directories.
@@ -12,55 +12,47 @@ from __future__ import annotations
 from omegaconf import OmegaConf
 
 
-class FakeDataStore:
-    """Stand-in for ``DataStore`` — answers the strategy query interface.
-
-    In the new architecture routing reads metrics from ``DataStore`` (passed to
-    ``route()`` as ``store``), not from the provider. Unit tests therefore
-    inject a ``FakeDataStore`` as ``balancer._store`` (via ``_fake_init_manager``)
-    so strategies read empty/default values without touching the real
-    singleton-backed ``DataStore``. Per-replica metrics can be supplied at
-    construction by tests that need non-empty data.
-    """
-
-    def __init__(self, metrics: dict | None = None):
-        self._metrics = metrics or {}
-
-    def get_metric(self, replica_id, key):
-        return self._metrics.get(replica_id, {}).get(key, 0.0)
-
-    def get_metrics(self, replica_id):
-        return dict(self._metrics.get(replica_id, {}))
-
-    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
-        return 0.0
-
-    def kv_cache_load(self, replica_id):
-        return 0.0
-
-
 class _FakeCollectorManager:
-    """Stand-in for ``CollectorManager`` — a pure lifecycle stub.
+    """Stand-in for ``CollectorManager`` — stubs NETWORK collectors but builds
+    REAL statistic collectors (anything with ``is_async=False``).
 
-    The provider only constructs and starts/stops collectors; routing reads
-    metrics from ``DataStore`` (here ``FakeDataStore``), not from the provider.
-    So this fake just records that ``start()`` ran so ``test_b03`` /
-    ``get_status`` can assert the lifecycle was driven.
+    The Balancer-callback → CallbackTransport → StickyDecoder/InflightDecoder →
+    DataStore chain is the heart of the Phase-1 refactor, so it must run
+    end-to-end (NOT mocked). Network collectors (vllm_metrics / vllm_zmq) need
+    live endpoints and are stubbed; tests inject metrics directly via
+    ``balancer._store.refresh_metrics(...)``.
     """
 
-    def __init__(self, collectors_config, collection_names, server_addresses=None, kv_event_endpoints=None):
+    def __init__(self, collectors_config, collection_names, server_addresses=None, kv_event_endpoints=None, balancer_handler=None):
         self.collectors_config = collectors_config
         self.collection_names = collection_names
         self.server_addresses = server_addresses
         self.kv_event_endpoints = kv_event_endpoints
+        self.balancer_handler = balancer_handler
         self.started = False
         self.stopped = False
+        # Build every collector through the real factory; keep only the statistic
+        # ones (is_async=False). Network collectors are built but not started.
+        from uni_agent.llm_router.collectors.collector import get_collector
+
+        self._statistic_collectors = [
+            c
+            for c in (
+                get_collector(name, collectors_config, balancer_handler=balancer_handler)
+                for name in collection_names
+            )
+            if not getattr(c._transport, "is_async", True)
+        ]
 
     def start(self):
         self.started = True
+        for c in self._statistic_collectors:
+            c.start()
 
     def stop(self):
         self.stopped = True
+        for c in self._statistic_collectors:
+            c.stop()
 
 
 def _router_config(weight: float = 1.0):
@@ -72,7 +64,7 @@ def _router_config(weight: float = 1.0):
                 {
                     "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
                     "weight": weight,
-                    "collector_names": ["vllm_zmq"],
+                    "collector_names": ["vllm_zmq", "sticky_stat"],
                 },
             ],
         }
@@ -82,19 +74,21 @@ def _router_config(weight: float = 1.0):
 def _fake_init_manager(self):
     """Replacement for KVCAwareBalancer._init_manager in unit tests.
 
-    Injects a lifecycle-only ``_FakeCollectorManager`` (so construction is
-    observable) AND a ``FakeDataStore`` as ``self._store``, overriding the real
-    ``DataStore()`` the Balancer constructed in ``__init__``. Strategies read
-    from ``self._store`` via ``route()``, so they see the fake, not the real
-    singleton-backed store — keeping unit tests hermetic from collector data.
+    Injects a ``_FakeCollectorManager`` that builds REAL statistic collectors
+    (sticky_stat/inflight_stat → the real Balancer-callback chain) while
+    stubbing network collectors. The real ``DataStore`` is KEPT (not swapped
+    for a stub) so the real statistic collectors
+    (``Collector._data_store = DataStore()``) and strategy reads share the SAME
+    singleton-backed store — that's what makes the sticky path actually work.
+    Tests inject metrics via ``balancer._store.refresh_metrics(...)``.
     """
     collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
     self._manager = _FakeCollectorManager(
         self._config.collector,
         collection_names,
+        balancer_handler=self,
     )
     self._manager.start()
-    self._store = FakeDataStore()
 
 
 def _fake_resolve_max_num_seqs(servers):

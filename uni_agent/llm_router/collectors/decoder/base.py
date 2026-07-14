@@ -62,10 +62,40 @@ class MetricsUpdate:
     Attributes:
         node_id: Target endpoint identifier.
         metrics: Dict of canonical_key → value.
+        is_delta: When ``False`` (default, ``VLLMMetricsDecoder``) the values
+            are absolute gauges applied via ``refresh`` (merge overwrite). When
+            ``True`` (``InflightDecoder``) the values are signed deltas applied
+            via ``incr`` — keeps the decoder stateless (it emits only ±1; the
+            store owns the running counter).
     """
 
     node_id: str
     metrics: dict[str, Any]
+    is_delta: bool = False
+
+
+@dataclass
+class StickyUpdate:
+    """Structured update command for StickySessionStore (per-request LRU).
+
+    Emitted by ``StickyDecoder`` from the Balancer's ``on_acquire`` /
+    ``on_servers_removed`` callbacks (packed into a ``StatisticEvent`` by
+    ``CallbackTransport``). Distinct from ``KVCacheUpdate`` (per-replica
+    block) and ``MetricsUpdate`` (per-replica gauge) because sticky is a
+    per-request dimension with LRU recency semantics — refresh/merge can't
+    express ``put`` / ``invalidate_replica``.
+
+    Attributes:
+        action: ``"put"`` / ``"invalidate"`` / ``"invalidate_replica"``.
+        request_id: Bound request id (for ``put`` / ``invalidate``).
+        replica_id: Bound replica id (for ``put``); ignored on invalidate_replica.
+        replica_ids: Replicas to clear (for ``invalidate_replica``).
+    """
+
+    action: str
+    request_id: str | None = None
+    replica_id: str | None = None
+    replica_ids: tuple[str, ...] = ()
 
 
 class Decoder(ABC):
@@ -76,14 +106,17 @@ class Decoder(ABC):
     """
 
     @abstractmethod
-    def decode(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | MetricsUpdate | None:
+    def decode(self, raw_data: bytes | str | Any, node_id: str) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | None:
         """Decode raw data and return a structured update.
 
         Args:
-            raw_data: Raw payload — ``bytes`` (from ZMQ) or ``str``
-                (from HTTP response text).
-            node_id: Source endpoint/node identifier.
+            raw_data: Raw payload — ``bytes`` (from ZMQ) / ``str`` (from HTTP
+                response text) for network transports, or a ``StatisticEvent``
+                for the callback transport (sticky / inflight decoders).
+            node_id: Source endpoint identifier (empty string for the callback
+                transport — the event carries its own request/replica ids).
 
         Returns:
-            A ``KVCacheUpdate`` or ``MetricsUpdate``, or ``None`` if decode fails.
+            A ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``, or
+            ``None`` if decode fails or the payload type is not handled.
         """

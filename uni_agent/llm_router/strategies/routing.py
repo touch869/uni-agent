@@ -30,15 +30,14 @@ class RoutingStrategy(Protocol):
         store: Any,
         replicas: list[Any],
         request_id: str | None = None,
-        sticky_table: Any = None,
     ) -> list[float]:
         """Score each replica. Larger is better; negatives are allowed.
 
-        ``request_id`` + ``sticky_table`` enable sticky-session short-circuit:
-        a strategy may return a pre-built score list that places the bound
-        replica first when it is not overloaded (see ``KVCacheAwareStrategy``).
-        Strategies that ignore stickiness should accept the kwargs and proceed
-        with their own scoring.
+        ``request_id`` enables sticky-session short-circuit: a strategy reads
+        the bound replica from ``store.get_sticky_binding(request_id)`` and may
+        return a pre-built score list that places it first when it is not
+        overloaded (see ``KVCacheAwareStrategy``). Strategies that ignore
+        stickiness accept ``request_id`` and proceed with their own scoring.
         """
         ...
 
@@ -54,7 +53,6 @@ def route(
     store: Any,
     replicas: list[Any],
     request_id: str | None = None,
-    sticky_table: Any = None,
 ) -> list[str]:
     """Return replica ids ranked best-first.
 
@@ -65,10 +63,9 @@ def route(
     Args:
         strategies: ``[(strategy, weight), ...]`` — weighted strategies.
         prompt_ids: prompt token ids (content-aware routing; may be ``None``).
-        provider: ``RouteDataProvider`` for metric queries.
+        store: ``DataStore`` for metric + sticky-session queries.
         replicas: ``[ReplicaInfo, ...]`` — candidate replicas.
         request_id: session id for sticky-session routing (may be ``None``).
-        sticky_table: ``StickySessionTable`` for sticky lookups (may be ``None``).
 
     Returns:
         Replica ids sorted by total score, best first. Falls back to random
@@ -90,7 +87,6 @@ def route(
                 store,
                 replicas,
                 request_id,
-                sticky_table,
             )
             if len(scores) != n:
                 raise ValueError(f"{name}.score() returned {len(scores)} scores, expected {n}")

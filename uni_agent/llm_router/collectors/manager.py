@@ -22,6 +22,10 @@ class CollectorManager:
             ``["vllm_metrics", "vllm_zmq"]``).
         server_addresses: ``{node_id: ip:port}`` for HTTP transport.
         kv_event_endpoints: ``{node_id: [sub_addr, replay_addr]}`` for ZMQ transport.
+        balancer_handler: The Balancer, forwarded to ``get_collector`` so the
+            ``sticky_stat`` / ``inflight_stat`` collectors can build a
+            ``CallbackTransport`` that registers its callbacks. Ignored by the
+            network collectors.
     """
 
     def __init__(
@@ -30,6 +34,7 @@ class CollectorManager:
         collection_names: list[str],
         server_addresses: dict[str, str] | None = None,
         kv_event_endpoints: dict[str, list[str]] | None = None,
+        balancer_handler=None,
     ) -> None:
         self._collectors: list[Collector] = [
             get_collector(
@@ -37,6 +42,7 @@ class CollectorManager:
                 collectors_config,
                 server_addresses=server_addresses,
                 kv_event_endpoints=kv_event_endpoints,
+                balancer_handler=balancer_handler,
             )
             for name in collection_names
         ]

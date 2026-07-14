@@ -6,6 +6,7 @@ from typing import Any
 
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.store.metrics_store import MetricsStore
+from uni_agent.llm_router.store.sticky_session_store import StickySessionStore
 from uni_agent.llm_router.types import Layer, MetricKey
 
 
@@ -28,6 +29,9 @@ class DataStore:
     def __init__(self) -> None:
         self._metrics = MetricsStore.singleton()
         self._kv = KVCacheStore.singleton()
+        # Sticky capacity is a code constant (DEFAULT_STICKY_MAX_SIZE), not
+        # configurable — see StickySessionStore.singleton().
+        self._sticky = StickySessionStore.singleton()
 
     # ── MetricsStore operations ─────────────────────────────────────────
 
@@ -177,3 +181,40 @@ class DataStore:
         tally log to surface retained-block counts per replica.
         """
         return self._kv.per_replica_block_counts()
+
+    # ── MetricsStore incremental write ──────────────────────────────────
+
+    def incr_metric(self, node_id: str, key: str, delta: int | float = 1) -> None:
+        """Apply a signed delta to one metric for one node (inflight ±1).
+
+        Routes to ``MetricsStore.incr`` (not ``refresh``) so a stateless delta
+        emitter (``InflightDecoder``) can move a running counter without
+        tracking the absolute value itself.
+        """
+        self._metrics.incr(node_id, key, delta)
+
+    # ── StickySessionStore operations ───────────────────────────────────
+
+    def get_sticky_binding(self, request_id: str) -> str | None:
+        """Return the bound replica_id for ``request_id`` (None if cold/evicted).
+
+        Strategies read sticky affinity through this single entry point.
+        Refreshes LRU recency on hit.
+        """
+        return self._sticky.get(request_id)
+
+    def put_sticky_binding(self, request_id: str, replica_id: str) -> None:
+        """Bind / refresh ``request_id → replica_id`` (driven by ``on_acquire``)."""
+        self._sticky.put(request_id, replica_id)
+
+    def invalidate_sticky_binding(self, request_id: str) -> None:
+        """Drop one request_id's binding (per-request expiry)."""
+        self._sticky.invalidate(request_id)
+
+    def invalidate_sticky_replica(self, replica_id: str) -> None:
+        """Drop every binding pointing at a removed replica (``on_servers_removed``)."""
+        self._sticky.invalidate_replica(replica_id)
+
+    def sticky_status(self) -> dict:
+        """Return a debugging snapshot of the sticky table state."""
+        return self._sticky.status()

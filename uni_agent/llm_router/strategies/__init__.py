@@ -9,7 +9,6 @@ from uni_agent.llm_router.strategies.base import ReplicaInfo
 from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy, StrategyError
 from uni_agent.llm_router.strategies.registry import StrategyRegistry
 from uni_agent.llm_router.strategies.routing import RoutingStrategy, route
-from uni_agent.llm_router.strategies.sticky_session import StickySessionTable
 
 __all__ = [
     "KVCacheAwareStrategy",
@@ -17,6 +16,5 @@ __all__ = [
     "RoutingStrategy",
     "StrategyError",
     "StrategyRegistry",
-    "StickySessionTable",
     "route",
 ]

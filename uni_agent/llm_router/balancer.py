@@ -12,7 +12,7 @@ Protocol (6 methods) via structural subtyping.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import ray
 
@@ -22,7 +22,6 @@ from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.store import DataStore
 from uni_agent.llm_router.strategies import (
     ReplicaInfo,
-    StickySessionTable,
     StrategyRegistry,
     route,
 )
@@ -47,7 +46,12 @@ class KVCAwareBalancer:
         logger.info(f"KVCAwareBalancer: injected max_num_seqs={max_num_seqs} from server handle")
         self._servers: dict[str, Any] = dict(servers)
         self._route_calls = 0
-        self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
+        # Before _init_manager: CallbackTransport subscribes during manager.start().
+        self._callbacks: dict[str, list[Callable]] = {
+            "on_acquire": [],
+            "on_release": [],
+            "on_servers_removed": [],
+        }
         # _store before _init_manager: real env's _init_manager only wires the
         # collector manager, but tests inject a fake store via _init_manager, so
         # the real DataStore must be constructed first (and thus overridable).
@@ -112,8 +116,36 @@ class KVCAwareBalancer:
             collection_names,
             server_addresses=server_addresses,
             kv_event_endpoints=kv_event_endpoints,
+            balancer_handler=self,
         )
         self._manager.start()
+
+    # ── Callback registry (opt-in hook points for statistic collectors) ──
+
+    def register_call_back(self, event: str, fn: Callable) -> None:
+        """Append ``fn`` to the listeners for ``event``.
+
+        Opt-in hook points: ``on_acquire`` / ``on_release`` / ``on_servers_removed``.
+        """
+        self._callbacks.setdefault(event, []).append(fn)
+
+    def un_register_call_back(self, event: str, fn: Callable) -> None:
+        """Remove ``fn`` from ``event``'s callback list (idempotent)."""
+        lst = self._callbacks.get(event, [])
+        if fn in lst:
+            lst.remove(fn)
+
+    def _fire(self, event: str, *args: Any) -> None:
+        """Invoke every registered callback for ``event`` (errors swallowed).
+
+        A buggy statistic collector must not break the request path or other
+        callbacks, so each callback is isolated.
+        """
+        for fn in self._callbacks.get(event, []):
+            try:
+                fn(*args)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"callback {event} failed: {type(exc).__name__}: {exc}")
 
     def get_all_servers(self) -> list[str]:
         """List all active server ids."""
@@ -131,11 +163,17 @@ class KVCAwareBalancer:
             "manager": type(self._manager).__name__,
             "strategies": [{"type": type(s).__name__, "weight": w} for s, w in self._strategies],
             "route_calls": self._route_calls,
-            "sticky_size": len(self._sticky),
+            "sticky_size": self._store.sticky_status()["size"],
         }
 
     def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes. No-op in v1 (no inflight)."""
+        """Release a server after a request completes.
+
+        Fires ``on_release`` so the InflightDecoder decrements the in-flight
+        counter (mirrors verl ``GlobalRequestLoadBalancer``'s release -1). The
+        sticky binding is untouched here — it persists across turns.
+        """
+        self._fire("on_release", server_id)
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Acquire the best server for a request: delegate to ``route()``, map back.
@@ -144,12 +182,11 @@ class KVCAwareBalancer:
         best-first ranking, and returns ``(ranking[0], handle)``. Raises
         ``RuntimeError`` if no replica is available (empty pool or all blacklisted).
 
-        The ``request_id`` and the sticky-session table are forwarded to
-        ``route()`` so strategies can short-circuit to a bound, non-overloaded
-        replica. After a ranking is chosen, the binding is refreshed so the
-        next turn of the same ``request_id`` stays affinity-bound (or, when a
-        sticky replica was overloaded and routing fell back, rebinds to the
-        new choice).
+        ``request_id`` is forwarded to ``route()`` so strategies can short-circuit
+        to a bound, non-overloaded replica (read via ``store.get_sticky_binding``).
+        After a ranking is chosen, ``on_acquire`` fires so the sticky binding is
+        refreshed and the in-flight counter bumps — the next turn of the same
+        ``request_id`` stays affinity-bound (or rebinds when routing fell back).
         """
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
@@ -159,12 +196,12 @@ class KVCAwareBalancer:
             self._store,
             replicas,
             request_id,
-            self._sticky,
         )
         if not ranking:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
-        self._sticky.put(request_id, server_id)
+        # After route() picks the winner — strategy.score() runs before the sort.
+        self._fire("on_acquire", request_id, server_id)
         logger.info(
             f"request={request_id} routed to server={server_id} (ranking={ranking}, pool={list(self._servers)})",
         )
@@ -182,12 +219,14 @@ class KVCAwareBalancer:
     def remove_servers(self, server_ids: list[str]) -> None:
         """Bulk-remove servers from the pool (manager is not keyed by the pool).
 
-        Also invalidates every sticky binding pointing at a removed server so a
-        subsequent ``acquire_server`` for a bound conversation doesn't try to
-        short-circuit to a dead replica (the strategy would reject it and fall
-        back to combined scoring anyway, but clearing early keeps the table
-        clean and the logs honest).
+        Fires ``on_servers_removed`` so the sticky-session store invalidates
+        every binding pointing at a removed server — a subsequent
+        ``acquire_server`` for a bound conversation won't short-circuit to a
+        dead replica (the strategy would reject it anyway, but clearing early
+        keeps the table clean and the logs honest). Inflight deliberately
+        ignores removal — release symmetry maintains the counter.
         """
         for sid in server_ids:
             self._servers.pop(sid, None)
-            self._sticky.invalidate_replica(sid)
+        if server_ids:
+            self._fire("on_servers_removed", server_ids)
