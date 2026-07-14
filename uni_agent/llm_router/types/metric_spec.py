@@ -46,6 +46,8 @@ class MetricKey:
     GENERATION_TOKENS: str = "generation_tokens"
     # External (mc connector) prefix-cache hits — cross-replica KV reuse.
     EXTERNAL_PREFIX_CACHE_HITS: str = "external_prefix_cache_hits"
+    # Estimated FLOPs per GPU (vLLM analytic counter; MFU = rate(flops) / peak_flops).
+    ESTIMATED_FLOPS_PER_GPU: str = "estimated_flops_per_gpu"
 
 
 # ── Metric definitions (single source of truth) ──────────────────────
@@ -133,5 +135,10 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
         "default": 0,
         "value_type": int,
         "describe": "Cumul. external (mc connector) prefix-cache hits — cross-replica KV reuse",
+    },
+    MetricKey.ESTIMATED_FLOPS_PER_GPU: {
+        "default": 0,
+        "value_type": int,
+        "describe": "Cumul. estimated FLOPs per GPU (vLLM analytic; MFU = rate / peak_flops)",
     },
 }

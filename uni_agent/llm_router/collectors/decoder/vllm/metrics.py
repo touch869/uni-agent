@@ -48,6 +48,8 @@ class VLLMMetricsDecoder(Decoder):
         "vllm:request_time_per_output_token_seconds_count": MetricKey.TPOT_COUNT,
         "vllm:generation_tokens_total": MetricKey.GENERATION_TOKENS,
         "vllm:external_prefix_cache_hits_total": MetricKey.EXTERNAL_PREFIX_CACHE_HITS,
+        # Analytic FLOPs counter (gated by vLLM --enable-mfu-metrics); for MFU.
+        "vllm:estimated_flops_per_gpu_total": MetricKey.ESTIMATED_FLOPS_PER_GPU,
         # PROMPT_TOKENS / PROMPT_TOKENS_CACHED are NOT here — they come from the
         # labeled ``prompt_tokens_by_source_total{source=...}`` metric, dispatched
         # label-aware in ``_resolve_canonical`` (cache_hit vs local_compute).

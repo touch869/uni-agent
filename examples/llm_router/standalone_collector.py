@@ -63,53 +63,75 @@ def _detect_local_ip() -> str:
         return "127.0.0.1"
 
 
-def _listen_ports() -> set[int]:
-    """TCP LISTEN ports from /proc/net/tcp."""
-    ports: set[int] = set()
+def _listen_sockets() -> list[tuple[str, int]]:
+    """(bind_ip, port) for each TCP LISTEN socket from /proc/net/tcp.
+
+    Reads the actual bind IP (decoded from hex, little-endian) so we can probe the
+    real interface vLLM bound to — not just a guessed ext_ip/127.0.0.1 (which misses
+    on hosts where vLLM binds /metrics to a specific non-loopback IP).
+    """
+    socks: list[tuple[str, int]] = []
     try:
         with open("/proc/net/tcp") as f:
             for line in f.readlines()[1:]:
                 parts = line.split()
                 if len(parts) < 4 or parts[3] != "0A":  # 0A = TCP_LISTEN
                     continue
+                hex_addr, _, hex_port = parts[1].partition(":")
                 try:
-                    ports.add(int(parts[1].split(":")[1], 16))
+                    port = int(hex_port, 16)
+                    ip = ".".join(str(b) for b in reversed(bytes.fromhex(hex_addr)))
                 except ValueError:
                     continue
+                socks.append((ip, port))
     except OSError as exc:
         logger.warning(f"could not read /proc/net/tcp: {exc}")
-    return ports
+    return socks
 
 
 async def discover_vllm_metrics_endpoints() -> dict[str, str]:
     """Return ``{replica_id: "ip:port"}`` for each vLLM HTTP /metrics endpoint.
 
-    Probes all LISTEN ports concurrently — serial probing of ~240 candidates
-    with per-port HTTP timeouts hangs for minutes under load.
+    Probes all LISTEN ports concurrently on their real bind IP (+ 127.0.0.1 / ext_ip
+    fallbacks for 0.0.0.0 binds). Logs a breakdown so discovery failures are visible.
     """
-    ports = _listen_ports()
+    socks = _listen_sockets()
     ext_ip = _detect_local_ip()
-    candidate_ips = [ext_ip, "127.0.0.1"]
+    # probe real bind IP, plus loopback + ext_ip fallbacks (covers 0.0.0.0 binds)
+    targets: set[tuple[str, int]] = set()
+    for ip, p in socks:
+        targets.add((ip, p))
+        targets.add(("127.0.0.1", p))
+        targets.add((ext_ip, p))
+
+    stats = {"hit": 0, "200_no_vllm": 0, "other_status": 0, "error": 0}
 
     async def _probe(client: httpx.AsyncClient, ip: str, p: int) -> tuple[int, str] | None:
         try:
             r = await client.get(f"http://{ip}:{p}/metrics")
-            if r.status_code == 200 and "vllm:" in r.text:
-                return (p, f"{ip}:{p}")
+            if r.status_code == 200:
+                if "vllm:" in r.text:
+                    stats["hit"] += 1
+                    return (p, f"{ip}:{p}")
+                stats["200_no_vllm"] += 1
+            else:
+                stats["other_status"] += 1
         except Exception:
-            return None
+            stats["error"] += 1
         return None
 
     found: dict[str, str] = {}
-    seen_ports: set[int] = set()
-    async with httpx.AsyncClient(trust_env=False, timeout=1.5) as client:
-        results = await asyncio.gather(
-            *[_probe(client, ip, p) for ip in candidate_ips for p in sorted(ports)]
-        )
+    # timeout 5s (not 1.5): under multi-replica startup/graph-capture the /metrics scrape
+    # is slow; 1.5s timed most out -> hit fluctuated 0-2. Probes are concurrent so total
+    # discovery time ~= this timeout.
+    async with httpx.AsyncClient(trust_env=False, timeout=5.0) as client:
+        results = await asyncio.gather(*[_probe(client, ip, p) for ip, p in sorted(targets)])
     for res in results:
-        if res and res[0] not in seen_ports:
-            seen_ports.add(res[0])
+        if res and res[0] not in found:
             found[f"replica-{res[0]}"] = res[1]
+    logger.info(f"/metrics discovery: {len(socks)} LISTEN sockets, {len(targets)} probes -> "
+                f"hit={stats['hit']} 200_no_vllm={stats['200_no_vllm']} "
+                f"other={stats['other_status']} err={stats['error']} | found {len(found)}")
     return found
 
 
@@ -119,7 +141,7 @@ def discover_kv_events_endpoints(probe_timeout: float = 3.0) -> dict[str, list[s
     Returns ``{replica_id: [sub_addr, "", "zmq", "kv-events"]}`` — replay left
     empty (sub-only mode); ``ZMQTransport`` handles this.
     """
-    ports = _listen_ports()
+    ports = sorted({p for _, p in _listen_sockets()})
     ext_ip = _detect_local_ip()
     ctx = zmq.Context()
     socks: dict[zmq.Socket, str] = {}
@@ -158,27 +180,58 @@ def discover_kv_events_endpoints(probe_timeout: float = 3.0) -> dict[str, list[s
 # ── Main ─────────────────────────────────────────────────────────────────
 
 
-async def main(interval: float, discover_timeout: float, kv_probe_timeout: float) -> None:
-    """Discover vLLM endpoints, start CollectorManager, block until interrupted."""
-    # Discover /metrics HTTP endpoints.
-    logger.info("discovering vLLM /metrics endpoints...")
+async def main(interval: float, discover_timeout: float, kv_probe_timeout: float,
+               num_replicas: int = 0) -> None:
+    """Discover vLLM endpoints, start CollectorManager, block until interrupted.
+
+    ``num_replicas``: expected endpoint count (data-parallel replicas). If >0, keep
+    probing until BOTH /metrics and kv-events reach it (or deadline) — vLLM replicas
+    start staggered, so exiting on the first endpoint found would miss the rest (on
+    910C 16-replica this left the collector with 1/16). Best-effort: at the deadline
+    it proceeds with whatever was found (warns if short).
+    """
+    def _enough(found: int) -> bool:
+        return found >= num_replicas if num_replicas > 0 else found > 0
+
+    # Discover /metrics HTTP endpoints — wait until all replicas are up.
+    logger.info(f"discovering vLLM /metrics endpoints (expect {num_replicas or '>=1'})...")
     metrics_endpoints: dict[str, str] = {}
     deadline = time.monotonic() + discover_timeout
-    while not metrics_endpoints and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
         metrics_endpoints = await discover_vllm_metrics_endpoints()
-        if not metrics_endpoints:
-            await asyncio.sleep(5)
+        if _enough(len(metrics_endpoints)):
+            break
+        logger.info(f"found {len(metrics_endpoints)}/{num_replicas or '?'} /metrics; "
+                    f"vllm still starting, retry in 5s ({int(deadline - time.monotonic())}s left)")
+        await asyncio.sleep(5)
     if not metrics_endpoints:
         logger.error(f"no /metrics endpoints found within {discover_timeout}s; exiting")
         return
+    if num_replicas > 0 and len(metrics_endpoints) < num_replicas:
+        logger.warning(f"only {len(metrics_endpoints)}/{num_replicas} /metrics endpoints up by "
+                       f"deadline; proceeding (pressure will undercount missing replicas)")
     logger.info(f"discovered {len(metrics_endpoints)} /metrics endpoint(s): "
                 f"{list(metrics_endpoints.values())}")
 
-    # Discover kv-events zmq endpoints (probe, sub-only).
-    logger.info(f"probing for kv-events publishers (timeout {kv_probe_timeout}s)...")
-    kv_endpoints = await asyncio.to_thread(discover_kv_events_endpoints, kv_probe_timeout)
-    logger.info(f"discovered {len(kv_endpoints)} kv-events endpoint(s): "
-                f"{list(kv_endpoints.keys())}")
+    # Discover kv-events zmq endpoints (probe, sub-only). Wait until all replicas emit
+    # (active replicas emit BlockStored; in a real run all replicas get traffic -> all
+    # emit). Best-effort at deadline; under sparse smoke load fewer replicas emit.
+    kv_deadline = time.monotonic() + discover_timeout
+    kv_endpoints: dict[str, list[str]] = {}
+    while time.monotonic() < kv_deadline:
+        kv_endpoints = await asyncio.to_thread(discover_kv_events_endpoints, kv_probe_timeout)
+        if _enough(len(kv_endpoints)):
+            break
+        logger.info(f"found {len(kv_endpoints)}/{num_replicas or '?'} kv-events; "
+                    f"retry in 5s ({int(kv_deadline - time.monotonic())}s left)")
+        await asyncio.sleep(5)
+    if kv_endpoints:
+        logger.info(f"discovered {len(kv_endpoints)} kv-events endpoint(s): "
+                    f"{list(kv_endpoints.keys())}")
+    else:
+        logger.warning(f"no kv-events endpoints found within {discover_timeout}s "
+                       f"(KV churn stayed sparse); kv_events tallies will be empty — "
+                       f"/metrics evidence still collected")
 
     # Build CollectorConfig (same defaults as the balancer).
     config = CollectorConfig()
@@ -240,13 +293,17 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Standalone KVCAware observer (no balancer)")
     ap.add_argument("--interval", type=float, default=1.0, help="/metrics polling interval (s)")
     ap.add_argument("--discover-timeout", type=float, default=600.0,
-                    help="max seconds to wait for /metrics endpoints at startup")
+                    help="max seconds to wait for /metrics AND kv-events endpoints at startup")
     ap.add_argument("--kv-probe-timeout", type=float, default=3.0,
                     help="seconds to listen for kv-events topic when probing")
+    ap.add_argument("--num-replicas", type=int, default=0,
+                    help="expected endpoint count (data-parallel replicas); wait until BOTH "
+                         "/metrics and kv-events reach it before collecting (0 = any non-empty)")
     args = ap.parse_args()
     logger.info(f"standalone collector start (interval={args.interval}s, "
-                f"kv_probe={args.kv_probe_timeout}s)")
+                f"kv_probe={args.kv_probe_timeout}s, expect={args.num_replicas or '?'} replicas)")
     try:
-        asyncio.run(main(args.interval, args.discover_timeout, args.kv_probe_timeout))
+        asyncio.run(main(args.interval, args.discover_timeout, args.kv_probe_timeout,
+                         args.num_replicas))
     except KeyboardInterrupt:
         pass

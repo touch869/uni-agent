@@ -85,6 +85,11 @@ def init_config(args: argparse.Namespace) -> DictConfig:
 
     # Engine kwargs: MooncakeStoreConnector (L2 KV) and/or kv-events zmq publisher.
     vllm_kwargs: dict = {}
+    # Enable vLLM's analytic FLOPs counter (vllm:estimated_flops_per_gpu_total) so
+    # the collector can derive per-replica MFU for load-balancing monitoring.
+    # Cheap (shape arithmetic per iter, not profiling). Flows to --enable-mfu-metrics
+    # via verl's build_cli_args_from_config (bool True -> bare flag).
+    vllm_kwargs["enable_mfu_metrics"] = True
     if args.enable_mooncake:
         # MooncakeStoreConnector for cross-replica KV sharing.
         # Config via MOONCAKE_CONFIG_PATH env, not extra_config.

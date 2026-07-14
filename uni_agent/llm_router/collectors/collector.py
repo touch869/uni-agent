@@ -36,6 +36,7 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
     MetricKey.PROMPT_TOKENS_CACHED,
     MetricKey.GENERATION_TOKENS,
     MetricKey.EXTERNAL_PREFIX_CACHE_HITS,
+    MetricKey.ESTIMATED_FLOPS_PER_GPU,
 )
 
 
@@ -154,7 +155,14 @@ class Collector:
         # against vllm's own "GPU KV cache usage" engine-stats log line.
         self._metrics_poll_count += 1
         if self._metrics_poll_count % _METRICS_LOG_EVERY_POLLS == 0:
-            self._log_evidence_window(update.node_id)
+            # Emit evidence for ALL known replicas, not just the one that happened
+            # to be polled at this poll-count tick. Metrics polling is serial
+            # (one replica per poll), so emitting only ``update.node_id`` here
+            # sampled ~1/N of replicas per window → some replicas never got an
+            # evidence line (e.g. 4/8 seen). Each replica keeps its own
+            # ``_metrics_prev`` baseline, so windowed deltas stay correct.
+            for nid in self._data_store.get_metric_node_ids():
+                self._log_evidence_window(nid)
 
     def _log_evidence_window(self, node_id: str) -> None:
         """Emit a windowed evidence summary for one replica.
@@ -176,7 +184,17 @@ class Collector:
             cur = float(snap.get(key, 0) or 0)
             return cur - float(prev.get(key, cur) or 0)
 
-        kv = snap.get(MetricKey.KV_CACHE_USAGE_PERC)
+        # kv = retained occupancy (retained_blocks/num_gpu_blocks) — the signal
+        # the strategy's load formula routes on. usage = vLLM's KV_CACHE_USAGE_PERC,
+        # the running-only fraction (1 - num_free_blocks/num_gpu_blocks; the free
+        # pool includes cached-but-freeable blocks, so usage EXCLUDES the prefix
+        # cache — vLLM docs: "1 means 100 percent usage"). Complementary signals:
+        # kv = hash-bearing blocks (free-cached + running-with-hash), usage =
+        # running-only. Emit both so the pressure story shows cache-fill (kv) vs
+        # running-pressure (usage) — eviction churns the cached-freeable sliver as
+        # usage → 1, which is why evictions climb before kv reaches 1.0.
+        kv = self._data_store.kv_cache_load(node_id)
+        usage_raw = snap.get(MetricKey.KV_CACHE_USAGE_PERC)
         run = snap.get(MetricKey.NUM_REQUESTS_RUNNING)
         wait = snap.get(MetricKey.NUM_REQUESTS_WAITING)
 
@@ -193,15 +211,17 @@ class Collector:
         d_cached = _delta(MetricKey.PROMPT_TOKENS_CACHED)
         d_decode = _delta(MetricKey.GENERATION_TOKENS)
         d_external = _delta(MetricKey.EXTERNAL_PREFIX_CACHE_HITS)
+        d_flops = _delta(MetricKey.ESTIMATED_FLOPS_PER_GPU)
         cache_hit_pct = 100.0 * d_cached / (d_cached + d_prefill) if (d_cached + d_prefill) > 0 else float("nan")
 
         kv_str = f"{kv:.3f}" if isinstance(kv, float) else kv
+        usage_str = f"{float(usage_raw):.3f}" if usage_raw is not None else "-"
         hit_str = f"{cache_hit_pct:.1f}" if cache_hit_pct == cache_hit_pct else "-"
         logger.info(
-            f"vllm-evidence replica={node_id} kv={kv_str} run={run} wait={wait} | "
+            f"vllm-evidence replica={node_id} kv={kv_str} usage={usage_str} run={run} wait={wait} | "
             f"TTFT={_ms(ttft_avg)}ms queue={_ms(queue_avg)}ms prefillT={_ms(prefill_t)}ms TPOT={_ms(tpot_avg)}ms | "
             f"prefill={int(d_prefill)} cached={int(d_cached)} (hit={hit_str}%) "
-            f"decode={int(d_decode)} external={int(d_external)} [poll #{self._metrics_poll_count}]"
+            f"decode={int(d_decode)} external={int(d_external)} flops={int(d_flops)} [poll #{self._metrics_poll_count}]"
         )
 
         # Snapshot current cumulative values for next window's delta.
