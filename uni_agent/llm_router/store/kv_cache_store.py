@@ -10,12 +10,13 @@ from uni_agent.llm_router.utils.hash import get_prefix_hashes
 
 
 class KVCacheStore:
-    """Mutable data carrier for KV cache mapping tables.
+    """Mutable data carrier for per-layer KV cache mapping tables.
 
     Attributes:
         block_size: Learned block size (None until first BlockStored event).
-        replicas_by_block: local prefix hash → set of replica_ids that cache
-            it on GPU.  CPU/SSD blocks are counted but not indexed here.
+        replicas_by_block: Public GPU reverse index mapping local prefix hashes
+            to the replica IDs that cache them. CPU and SSD use separate
+            internal indexes addressed through the canonical ``Layer`` API.
     """
 
     _instance: KVCacheStore | None = None
@@ -23,7 +24,11 @@ class KVCacheStore:
     def __init__(self) -> None:
         self.block_size: int | None = None
         self.replicas_by_block: dict[str, set[str]] = {}
-        # Per-layer per-replica block counts, maintained alongside replicas_by_block.
+        self._replicas_by_layer: dict[Layer, dict[str, set[str]]] = {
+            Layer.GPU: self.replicas_by_block,
+            Layer.CPU: {},
+            Layer.SSD: {},
+        }
         self._replica_layer_counts: dict[Layer, dict[str, int]] = {
             Layer.GPU: {},
             Layer.CPU: {},
@@ -41,20 +46,22 @@ class KVCacheStore:
     # ── Replica management ──────────────────────────────────────────────
 
     def clear_replica(self, replica_id: str) -> None:
-        """Clear all blocks for a replica from the reverse index.
+        """Clear every cached layer entry for a replica.
 
-        O(n) in the number of unique blocks, but replica count is typically small (< 100).
+        O(n) in the total number of unique blocks across all cache layers.
         """
         with self._lock:
-            stale_hashes: list[str] = []
-            for bh, replicas in self.replicas_by_block.items():
-                if replica_id not in replicas:
-                    continue
-                replicas.discard(replica_id)
-                if not replicas:
-                    stale_hashes.append(bh)
-            for bh in stale_hashes:
-                del self.replicas_by_block[bh]
+            for layer_index in self._replicas_by_layer.values():
+                stale_hashes: list[str] = []
+                for block_hash, replicas in layer_index.items():
+                    if replica_id not in replicas:
+                        continue
+                    replicas.discard(replica_id)
+                    if not replicas:
+                        stale_hashes.append(block_hash)
+                for block_hash in stale_hashes:
+                    del layer_index[block_hash]
+
             for layer_counts in self._replica_layer_counts.values():
                 layer_counts.pop(replica_id, None)
 
@@ -62,35 +69,36 @@ class KVCacheStore:
 
     def add_blocks(self, replica_id: str, block_hashes: Iterable[str],
                     layer: Layer = Layer.GPU) -> None:
-        """Add blocks to a replica at a layer, updating the reverse index.
-
-        Only GPU blocks are indexed in ``replicas_by_block`` (they drive
-        prefix-hit routing); CPU/SSD blocks are counted only.
-        """
+        """Add distinct blocks to a replica in the selected cache layer."""
         with self._lock:
-            layer_counts = self._replica_layer_counts.setdefault(layer, {})
-            for bh in block_hashes:
-                layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
-                if layer != Layer.GPU:
+            layer_index = self._replicas_by_layer[layer]
+            layer_counts = self._replica_layer_counts[layer]
+            for block_hash in block_hashes:
+                replicas = layer_index.setdefault(block_hash, set())
+                if replica_id in replicas:
                     continue
-                if bh not in self.replicas_by_block:
-                    self.replicas_by_block[bh] = set()
-                self.replicas_by_block[bh].add(replica_id)
+                replicas.add(replica_id)
+                layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
 
     def remove_blocks(self, replica_id: str, block_hashes: Iterable[str],
                       layer: Layer = Layer.GPU) -> None:
-        """Remove blocks from a replica at a layer, updating the reverse index."""
+        """Remove blocks from a replica at a layer, updating its reverse index."""
         with self._lock:
-            layer_counts = self._replica_layer_counts.setdefault(layer, {})
-            for bh in block_hashes:
-                layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
-                if layer != Layer.GPU:
+            layer_index = self._replicas_by_layer[layer]
+            layer_counts = self._replica_layer_counts[layer]
+            for block_hash in block_hashes:
+                replicas = layer_index.get(block_hash)
+                if replicas is None or replica_id not in replicas:
                     continue
-                replicas = self.replicas_by_block.get(bh)
-                if replicas is not None and replica_id in replicas:
-                    replicas.discard(replica_id)
-                    if not replicas:
-                        del self.replicas_by_block[bh]
+
+                replicas.discard(replica_id)
+                remaining = layer_counts.get(replica_id, 0) - 1
+                if remaining > 0:
+                    layer_counts[replica_id] = remaining
+                else:
+                    layer_counts.pop(replica_id, None)
+                if not replicas:
+                    del layer_index[block_hash]
 
     # ── Retained-cache size ─────────────────────────────────────────────
 
@@ -101,29 +109,28 @@ class KVCacheStore:
         O(replicas). Divide by the per-replica block pool size for occupancy.
         """
         with self._lock:
-            return dict(self._replica_layer_counts.get(Layer.GPU, {}))
+            return dict(self._replica_layer_counts[Layer.GPU])
 
     # ── Prefix hit rate queries ─────────────────────────────────────────
 
     def get_layer_prefix_hit_rate(self, node_id: str, prompt_ids: list[int],
                                    layer: Layer = Layer.GPU) -> float:
-        """Prefix-cache hit rate for a node at a layer, ∈ [0.0, 1.0].
+        """Prefix-cache hit rate for a node at a layer, in ``[0.0, 1.0]``.
 
-        GPU: walk the local reverse index (``replicas_by_block``) along the
-        prompt's prefix-hash chain until a hash isn't cached on this node.
-        CPU/SSD: placeholder 0.0 (mooncake /batch_query not wired yet).
+        Walk the selected layer's reverse index along the prompt's prefix-hash
+        chain until a hash is not cached on this node.
         """
         with self._lock:
-            if layer != Layer.GPU or self.block_size is None:
+            if self.block_size is None:
                 return 0.0
             prefix_hashes = get_prefix_hashes(prompt_ids, self.block_size)
             if not prefix_hashes:
                 return 0.0
-            hash_strs = [str(h) for h in prefix_hashes]
+            layer_index = self._replicas_by_layer[layer]
             matched = 0
-            for i, hs in enumerate(hash_strs):
-                cached = self.replicas_by_block.get(hs)
-                if cached is None or node_id not in cached:
-                    break  # chain break — this node doesn't cache this hash
-                matched = i + 1
-            return matched / len(hash_strs)
+            for index, prefix_hash in enumerate(prefix_hashes):
+                cached_replicas = layer_index.get(str(prefix_hash))
+                if cached_replicas is None or node_id not in cached_replicas:
+                    break
+                matched = index + 1
+            return matched / len(prefix_hashes)

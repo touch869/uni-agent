@@ -32,6 +32,13 @@ NODE_ID = f"{VLLM_HOST}:{VLLM_PORT}"
 ZMQ_SUB_PORT = int(os.environ.get("ZMQ_SUB_PORT", "5555"))
 ZMQ_REPLAY_PORT = int(os.environ.get("ZMQ_REPLAY_PORT", "5556"))
 
+CPU_KV_VLLM_HOST = os.environ.get("CPU_KV_VLLM_HOST", "127.0.0.1")
+CPU_KV_VLLM_PORT = int(os.environ.get("CPU_KV_VLLM_PORT", "8100"))
+CPU_KV_NODE_ID = f"{CPU_KV_VLLM_HOST}:{CPU_KV_VLLM_PORT}"
+CPU_KV_ZMQ_SUB_PORT = int(os.environ.get("CPU_KV_ZMQ_SUB_PORT", "5655"))
+CPU_KV_ZMQ_REPLAY_PORT = int(os.environ.get("CPU_KV_ZMQ_REPLAY_PORT", "5656"))
+CPU_KV_CACHE_SIZE_GB = os.environ.get("CPU_KV_CACHE_SIZE_GB", "1.0")
+
 
 # ── Shared helper ────────────────────────────────────────────────────────
 
@@ -106,7 +113,11 @@ def vllm_kv_service():
         kv_events_config,
     ]
 
-    proc = subprocess.Popen(cmd)
+    env = os.environ.copy()
+    if devices := os.environ.get("VLLM_CUDA_VISIBLE_DEVICES"):
+        env["CUDA_VISIBLE_DEVICES"] = devices
+
+    proc = subprocess.Popen(cmd, env=env)
 
     metrics_url = f"http://{NODE_ID}/metrics"
     max_wait = 360
@@ -133,6 +144,94 @@ def vllm_kv_service():
         pytest.skip(f"vLLM server for {VLLM_MODEL} did not become ready within {max_wait}s")
 
     yield NODE_ID
+
+    proc.send_signal(signal.SIGTERM)
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.fixture(scope="session")
+def vllm_cpu_kv_service():
+    """Start one vLLM server that emits CPU-layer ZMQ KV events.
+
+    Uses separate HTTP/ZMQ ports from ``vllm_kv_service`` so the CPU-layer
+    integration test can run independently without colliding with the existing
+    GPU KV-event integration tests.
+    """
+    kv_events_config = json.dumps(
+        {
+            "enable_kv_cache_events": True,
+            "publisher": "zmq",
+            "topic": "kv-events",
+            "endpoint": f"tcp://*:{CPU_KV_ZMQ_SUB_PORT}",
+            "replay_endpoint": f"tcp://*:{CPU_KV_ZMQ_REPLAY_PORT}",
+        }
+    )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        VLLM_MODEL,
+        "--host",
+        CPU_KV_VLLM_HOST,
+        "--port",
+        str(CPU_KV_VLLM_PORT),
+        "--trust-remote-code",
+        "--tensor_parallel_size",
+        "2",
+        "--dtype",
+        "bfloat16",
+        "--gpu_memory_utilization",
+        "0.6",
+        "--max-model-len",
+        "8192",
+        "--enable-prefix-caching",
+        "--kv-offloading-size",
+        CPU_KV_CACHE_SIZE_GB,
+        "--kv-offloading-backend",
+        "native",
+        "--override_generation_config",
+        '{"temperature": 0.8, "top_k": -1, "top_p": 0.9, "repetition_penalty": 1.0, "max_new_tokens": 4096}',
+        "--kv-events-config",
+        kv_events_config,
+    ]
+
+    env = os.environ.copy()
+    if devices := os.environ.get("CPU_KV_CUDA_VISIBLE_DEVICES"):
+        env["CUDA_VISIBLE_DEVICES"] = devices
+
+    proc = subprocess.Popen(cmd, env=env)
+
+    metrics_url = f"http://{CPU_KV_NODE_ID}/metrics"
+    max_wait = 360
+    deadline = time.time() + max_wait
+    ready = False
+
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(metrics_url, timeout=5.0)
+            if resp.status_code == 200:
+                ready = True
+                break
+        except (httpx.ConnectError, httpx.TimeoutException):
+            pass
+        time.sleep(3)
+
+    if not ready:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        pytest.skip(f"CPU-layer vLLM server for {VLLM_MODEL} did not become ready within {max_wait}s")
+
+    yield CPU_KV_NODE_ID
 
     proc.send_signal(signal.SIGTERM)
     try:
