@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MalformedRequestError, MessageCodec
 from uni_agent.gateway.session.types import SessionHandle, Trajectory
+from uni_agent.specrl import spec_counter_names
 
 
 class SessionPhase(str, Enum):
@@ -45,6 +46,7 @@ class TrajectoryBuffer:
     response_ids: list[int] = field(default_factory=list)
     response_mask: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
+    extra_fields: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -118,12 +120,14 @@ class GatewaySession:
         *,
         prompt_length: int | None = None,
         response_length: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
         self.handle = handle
         self._codec = codec
         self._prompt_length = prompt_length
         self._response_length = response_length
+        self._metadata = dict(metadata or {})
         self.active_tool_schemas: list[dict[str, Any]] | None = None
         self.message_history: list[dict[str, Any]] = []
         self.image_data: list[Any] | None = None
@@ -177,12 +181,16 @@ class GatewaySession:
                     )
 
             try:
+                generation_kwargs = {}
+                if self._metadata.get("partition_id") == "train":
+                    generation_kwargs["specrl_enabled"] = True
                 output = await backend.generate(
                     request_id=self.handle.session_id,
                     prompt_ids=encoded.context_ids,
                     sampling_params=encoded.sampling_params,
                     image_data=encoded.image_data,
                     video_data=encoded.video_data,
+                    **generation_kwargs,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -194,6 +202,7 @@ class GatewaySession:
             encoded.buffer.response_mask.extend([1] * len(response_ids))
             if output.log_probs is not None:
                 encoded.buffer.response_logprobs.extend(list(output.log_probs))
+            self._merge_output_extra_fields(encoded.buffer.extra_fields, output.extra_fields)
 
             assistant_msg, finish_reason = await self._codec.decode_response(
                 response_ids,
@@ -379,6 +388,7 @@ class GatewaySession:
             response_ids=list(buffer.response_ids),
             response_mask=list(buffer.response_mask),
             response_logprobs=list(buffer.response_logprobs),
+            extra_fields=dict(buffer.extra_fields),
         )
 
     def _materialize_active_trajectory(self) -> None:
@@ -404,8 +414,22 @@ class GatewaySession:
             reward_info={},
             num_turns=self._count_chat_turns(self.message_history),
             multi_modal_data=self._build_multi_modal_trajectory_data(self.image_data, self.video_data),
-            extra_fields=dict(extra_fields) if extra_fields else {},
+            extra_fields={**active.extra_fields, **(dict(extra_fields) if extra_fields else {})},
         )
+
+    @staticmethod
+    def _merge_output_extra_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
+        for key in spec_counter_names():
+            target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+
+        min_version = source.get("min_global_steps", source.get("global_steps"))
+        max_version = source.get("max_global_steps", source.get("global_steps"))
+        if min_version is not None:
+            target["min_global_steps"] = min(int(target.get("min_global_steps", min_version)), int(min_version))
+        if max_version is not None:
+            target["max_global_steps"] = max(int(target.get("max_global_steps", max_version)), int(max_version))
+        if source.get("spec_fallback_reason"):
+            target["spec_fallback_reason"] = source["spec_fallback_reason"]
 
     def _count_chat_turns(self, message_history: list[dict[str, Any]]) -> int:
         return sum(1 for m in message_history if m.get("role") in ("user", "assistant")) + 1

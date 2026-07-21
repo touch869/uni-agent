@@ -687,7 +687,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
         raw_prompt = sample_fields["raw_prompt"]
         tools_kwargs = sample_fields.get("tools_kwargs")
-        session = await self.gateway_manager.create_session(session_id)
+        session = await self.gateway_manager.create_session(
+            session_id,
+            metadata={"partition_id": "val" if sample_fields.get("validate", False) else "train"},
+        )
         try:
             if runner_config.dispatch_mode == "ray_task":
                 # Ray workers run only the runner. Gateway token truth,

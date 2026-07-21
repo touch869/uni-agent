@@ -20,6 +20,7 @@ from omegaconf import OmegaConf
 from uni_agent.framework.base import AgentFramework
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.manager import GatewayManager
+from uni_agent.specrl import SpecRLDraftCacheActor, SpecRLLLMServerClient, SpecRLSettings
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.transferqueue_utils import tq
@@ -32,6 +33,19 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
     # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
     af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
+    specrl_settings = SpecRLSettings.from_mapping(
+        af_cfg.get("specrl", {}), rollout_config=config.actor_rollout_ref.rollout
+    )
+    cache = None
+    if specrl_settings.enabled:
+        mtp_cfg = config.actor_rollout_ref.model.get("mtp", None)
+        if mtp_cfg is not None and mtp_cfg.get("enable", False) and mtp_cfg.get("enable_rollout", False):
+            raise ValueError("SPEC-RL and rollout MTP speculative decoding cannot be enabled together")
+        cache = SpecRLDraftCacheActor.remote(
+            specrl_settings.cache_max_entries,
+            specrl_settings.cache_max_tokens,
+        )
+    llm_client = SpecRLLLMServerClient(llm_client, cache, specrl_settings)
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)

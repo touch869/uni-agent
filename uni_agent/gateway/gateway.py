@@ -241,6 +241,7 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
+            metadata=metadata,
         )
         return handle
 

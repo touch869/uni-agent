@@ -74,6 +74,11 @@ TOP_P="${TOP_P:-1.0}"
 TOP_K="${TOP_K:--1}"
 ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.7}"
 UPDATE_WEIGHTS_BUCKET_MB="${UPDATE_WEIGHTS_BUCKET_MB:-2048}"
+SPECRL_ENABLED="${SPECRL_ENABLED:-false}"
+SPECRL_BIAS="${SPECRL_BIAS:-0.5}"
+SPECRL_SEED="${SPECRL_SEED:-1234}"
+SPECRL_CACHE_MAX_ENTRIES="${SPECRL_CACHE_MAX_ENTRIES:-10000}"
+SPECRL_CACHE_MAX_TOKENS="${SPECRL_CACHE_MAX_TOKENS:-10000000}"
 
 # ── Megatron training parallelism ────────────────────────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
@@ -160,6 +165,7 @@ echo "Runner:      ${RUNNER}"
 echo "Turns:       agent_max_turns=${AGENT_MAX_TURNS}"
 echo "Batch:       n=${N}, mini_bsz=${PPO_MINI_BATCH_SIZE}"
 echo "Sequence:    prompt=${PROMPT_LENGTH}, response=${RESPONSE_LENGTH}"
+echo "SPEC-RL:     enabled=${SPECRL_ENABLED}, bias=${SPECRL_BIAS}"
 echo "Trainer:     V1 ${TRAINER_MODE}"
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
     echo "Resources:   trainer=${NNODES}x${N_GPUS_PER_NODE}, rollout=${ROLLOUT_NNODES}x${ROLLOUT_NGPUS_PER_NODE}"
@@ -267,6 +273,11 @@ MAIN_CMD=(
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true' \
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=${AGENT_MAX_TURNS} \
     actor_rollout_ref.rollout.agent.num_workers=${NUM_AGENT_WORKERS} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.enabled=${SPECRL_ENABLED} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.bias=${SPECRL_BIAS} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.seed=${SPECRL_SEED} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.cache_max_entries=${SPECRL_CACHE_MAX_ENTRIES} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.cache_max_tokens=${SPECRL_CACHE_MAX_TOKENS} \
     "${RUNNER_ARGS[@]}" \
     actor_rollout_ref.actor.clip_ratio_low=${CLIP_RATIO_LOW} \
     actor_rollout_ref.actor.clip_ratio_high=${CLIP_RATIO_HIGH} \
