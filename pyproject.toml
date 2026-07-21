@@ -20,6 +20,9 @@ license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 
+[project.entry-points."vllm.general_plugins"]
+histospec_v017 = "uni_agent.histospec_vllm017_plugin:install"
+
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------
