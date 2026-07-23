@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import random
+import time
 from array import array
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -32,6 +33,29 @@ _SPEC_COUNTERS = (
     "spec_cache_misses",
     "spec_fallbacks",
     "spec_saved_tokens",
+    "spec_version_older_bypass",
+    "spec_version_equal_bypass",
+    "spec_version_newer_verify",
+    "spec_verify_prompt_tokens",
+    "spec_verify_draft_tokens",
+    "spec_continuation_tokens",
+    "spec_continuation_cached_tokens",
+    "spec_continuation_prefill_tokens",
+    "spec_fallback_unsupported",
+    "spec_fallback_cache_miss",
+    "spec_fallback_older_policy",
+    "spec_fallback_equal_policy",
+    "spec_fallback_verification_error",
+    "spec_fallback_missing_logprobs",
+    "spec_fallback_continuation_error",
+)
+
+_SPEC_TIMINGS = (
+    "spec_cache_lookup_ms",
+    "spec_version_check_ms",
+    "spec_verify_ms",
+    "spec_continuation_ms",
+    "spec_normal_fallback_ms",
 )
 
 
@@ -48,7 +72,7 @@ class SpecRLSettings:
     repetition_penalty: float = 1.0
 
     @classmethod
-    def from_mapping(cls, value: Any, *, rollout_config: Any) -> "SpecRLSettings":
+    def from_mapping(cls, value: Any, *, rollout_config: Any) -> SpecRLSettings:
         value = value or {}
         get = value.get if hasattr(value, "get") else lambda key, default=None: default
         return cls(
@@ -147,14 +171,18 @@ class SpecRLDraftCache:
 SpecRLDraftCacheActor = ray.remote(SpecRLDraftCache)
 
 
-def _counter_fields(**updates: int) -> dict[str, int]:
-    counters = {key: 0 for key in _SPEC_COUNTERS}
+def _counter_fields(**updates: int | float) -> dict[str, int | float]:
+    counters: dict[str, int | float] = {key: 0 for key in _SPEC_COUNTERS}
+    counters.update({key: 0.0 for key in _SPEC_TIMINGS})
     counters.update(updates)
     return counters
 
 
-def _merge_extra_fields(output: TokenOutput, counters: dict[str, int], **extra: Any) -> TokenOutput:
-    output.extra_fields.update(counters)
+def _merge_extra_fields(output: TokenOutput, counters: dict[str, int | float], **extra: Any) -> TokenOutput:
+    for key in _SPEC_COUNTERS:
+        output.extra_fields[key] = int(output.extra_fields.get(key, 0)) + int(counters.get(key, 0))
+    for key in _SPEC_TIMINGS:
+        output.extra_fields[key] = float(output.extra_fields.get(key, 0.0)) + float(counters.get(key, 0.0))
     output.extra_fields.update(extra)
     return output
 
@@ -194,133 +222,193 @@ class SpecRLLLMServerClient:
         if not specrl_enabled or not self.settings.enabled:
             return await self.base_client.generate(**call_kwargs)
 
-        fallback_reason = self._unsupported_reason(
+        unsupported_reason = self._unsupported_reason(
             sampling_params=sampling_params,
             image_data=image_data,
             video_data=video_data,
             audio_data=audio_data,
         )
-        if fallback_reason is not None:
-            output = await self.base_client.generate(**call_kwargs)
-            return _merge_extra_fields(
-                output,
-                _counter_fields(spec_fallbacks=1),
-                spec_fallback_reason=fallback_reason,
+        if unsupported_reason is not None:
+            return await self._normal_fallback(
+                call_kwargs,
+                _counter_fields(
+                    spec_fallbacks=1,
+                    spec_fallback_unsupported=1,
+                ),
+                reason="unsupported",
+                with_logprobs=False,
             )
 
         key = self._cache_key(prompt_ids, sampling_params)
+        lookup_started = time.perf_counter()
         try:
             cached = await self._cache_call("get", key)
-            if cached is None:
-                output = await self._generate_with_logprobs(call_kwargs)
-                await self._store_output(key, output)
-                return _merge_extra_fields(output, _counter_fields(spec_cache_misses=1))
-            return await self._generate_from_draft(key, cached, call_kwargs)
-        except Exception as exc:
-            logger.warning("SPEC-RL fallback for request %s: %s: %s", request_id, type(exc).__name__, exc)
-            output = await self.base_client.generate(**call_kwargs)
-            return _merge_extra_fields(
-                output,
-                _counter_fields(spec_fallbacks=1),
-                spec_fallback_reason=type(exc).__name__,
+        except Exception:
+            logger.exception("SPEC-RL cache lookup failed for request %s", request_id)
+            return await self._normal_fallback(
+                call_kwargs,
+                _counter_fields(
+                    spec_fallbacks=1,
+                    spec_fallback_verification_error=1,
+                    spec_cache_lookup_ms=(time.perf_counter() - lookup_started) * 1000.0,
+                ),
+                reason="verification_error",
             )
+        lookup_ms = (time.perf_counter() - lookup_started) * 1000.0
+        if cached is None:
+            return await self._normal_fallback(
+                call_kwargs,
+                _counter_fields(
+                    spec_cache_misses=1,
+                    spec_fallback_cache_miss=1,
+                    spec_cache_lookup_ms=lookup_ms,
+                ),
+                reason="cache_miss",
+                cache_key=key,
+                count_as_fallback=False,
+            )
+        return await self._generate_from_draft(key, cached, call_kwargs, lookup_ms=lookup_ms)
 
     async def _generate_from_draft(
         self,
         key: str,
         cached: dict[str, Any],
         call_kwargs: dict[str, Any],
+        *,
+        lookup_ms: float,
     ) -> TokenOutput:
         draft_ids = self._as_list(cached["token_ids"], int)
         old_logprobs = self._as_list(cached["logprobs"], float)
-        prompt_ids = list(call_kwargs["prompt_ids"])
-
-        score_output = await self.base_client.generate(
-            request_id=call_kwargs["request_id"],
-            prompt_ids=prompt_ids + draft_ids,
-            sampling_params={
-                "max_tokens": 1,
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "top_k": -1,
-                "prompt_logprobs": 0,
-                "logprobs": False,
-            },
-            image_data=None,
-            video_data=None,
-            audio_data=None,
-            mm_processor_kwargs=None,
-        )
-        current_version = self._policy_version(score_output)
         cached_version = int(cached["policy_version"])
-        if current_version <= cached_version:
-            output = await self._generate_with_logprobs(call_kwargs)
-            await self._store_output(key, output)
-            return _merge_extra_fields(
-                output,
-                _counter_fields(spec_cache_hits=1, spec_fallbacks=1),
-                spec_fallback_reason="non_newer_policy",
-            )
+        request_id = str(call_kwargs["request_id"])
 
-        prompt_logprobs = score_output.extra_fields.get("prompt_logprobs")
-        if prompt_logprobs is None:
-            raise ValueError("rollout server did not return prompt_logprobs")
-        start = len(prompt_ids)
-        new_logprobs = [float(row[0]) for row in prompt_logprobs[start : start + len(draft_ids)]]
-        if len(new_logprobs) != len(draft_ids):
-            raise ValueError("prompt_logprobs length does not cover the cached draft")
+        version_started = time.perf_counter()
+        try:
+            current_version = int(await self.base_client.get_policy_version(request_id=request_id))
+        except Exception:
+            logger.exception("SPEC-RL policy-version check failed for request %s", request_id)
+            return await self._normal_fallback(
+                call_kwargs,
+                _counter_fields(
+                    spec_cache_hits=1,
+                    spec_fallbacks=1,
+                    spec_fallback_verification_error=1,
+                    spec_cache_lookup_ms=lookup_ms,
+                    spec_version_check_ms=(time.perf_counter() - version_started) * 1000.0,
+                ),
+                reason="verification_error",
+                cache_key=key,
+            )
+        version_ms = (time.perf_counter() - version_started) * 1000.0
+
+        if current_version <= cached_version:
+            older = current_version < cached_version
+            reason = "older_policy" if older else "equal_policy"
+            return await self._normal_fallback(
+                call_kwargs,
+                _counter_fields(
+                    spec_cache_hits=1,
+                    spec_fallbacks=1,
+                    spec_version_older_bypass=int(older),
+                    spec_version_equal_bypass=int(not older),
+                    spec_fallback_older_policy=int(older),
+                    spec_fallback_equal_policy=int(not older),
+                    spec_cache_lookup_ms=lookup_ms,
+                    spec_version_check_ms=version_ms,
+                ),
+                reason=reason,
+                cache_key=key,
+            )
 
         seed_material = f"{self.settings.seed}:{key}:{current_version}".encode()
         accept_seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
-        accepted = accepted_prefix_length(
-            old_logprobs,
-            new_logprobs,
-            bias=self.settings.bias,
-            seed=accept_seed,
-        )
-        counters = _counter_fields(
-            spec_num_draft_tokens=len(draft_ids),
-            spec_num_accepted_tokens=accepted,
-            spec_num_verify_steps=1,
-            spec_cache_hits=1,
-            spec_saved_tokens=accepted,
-        )
+        try:
+            output = await self.base_client.verify_and_generate(
+                request_id=request_id,
+                prompt_ids=list(call_kwargs["prompt_ids"]),
+                draft_ids=draft_ids,
+                old_logprobs=old_logprobs,
+                sampling_params=dict(call_kwargs["sampling_params"]),
+                bias=self.settings.bias,
+                accept_seed=accept_seed,
+                expected_policy_version=current_version,
+                cached_stop_reason=cached["stop_reason"],
+                priority=call_kwargs.get("priority", 0),
+            )
+        except Exception:
+            logger.exception("SPEC-RL verify-and-generate failed for request %s", request_id)
+            return await self._normal_fallback(
+                call_kwargs,
+                _counter_fields(
+                    spec_cache_hits=1,
+                    spec_fallbacks=1,
+                    spec_version_newer_verify=1,
+                    spec_fallback_verification_error=1,
+                    spec_cache_lookup_ms=lookup_ms,
+                    spec_version_check_ms=version_ms,
+                ),
+                reason="verification_error",
+                cache_key=key,
+            )
 
-        max_tokens = int(call_kwargs["sampling_params"]["max_tokens"])
-        if accepted == len(draft_ids) or accepted >= max_tokens:
-            score_extra_fields = {
-                key: value
-                for key, value in score_output.extra_fields.items()
-                if key not in {"prompt_ids", "prompt_logprobs"}
-            }
-            output = TokenOutput(
-                token_ids=draft_ids[:max_tokens],
-                log_probs=new_logprobs[:max_tokens],
-                stop_reason=cached["stop_reason"] if accepted == len(draft_ids) else "length",
-                extra_fields=score_extra_fields,
+        error_reason = output.extra_fields.pop("_specrl_error_reason", None)
+        if error_reason is not None:
+            reason_field = {
+                "missing_logprobs": "spec_fallback_missing_logprobs",
+                "continuation_error": "spec_fallback_continuation_error",
+            }.get(str(error_reason), "spec_fallback_verification_error")
+            operation_metrics = {name: output.extra_fields.get(name, 0) for name in (*_SPEC_COUNTERS, *_SPEC_TIMINGS)}
+            operation_metrics.update(
+                {
+                    "spec_cache_hits": 1,
+                    "spec_fallbacks": 1,
+                    "spec_version_newer_verify": 1,
+                    "spec_cache_lookup_ms": lookup_ms,
+                    "spec_version_check_ms": version_ms,
+                    reason_field: 1,
+                }
             )
-        else:
-            continuation_kwargs = dict(call_kwargs)
-            continuation_kwargs["prompt_ids"] = prompt_ids + draft_ids[:accepted]
-            continuation_params = dict(call_kwargs["sampling_params"])
-            continuation_params["max_tokens"] = max_tokens - accepted
-            continuation_params["logprobs"] = True
-            continuation_kwargs["sampling_params"] = continuation_params
-            continuation = await self.base_client.generate(**continuation_kwargs)
-            if continuation.log_probs is None:
-                raise ValueError("continuation did not return log probabilities")
-            output = TokenOutput(
-                token_ids=draft_ids[:accepted] + list(continuation.token_ids),
-                log_probs=new_logprobs[:accepted] + list(continuation.log_probs),
-                routed_experts=continuation.routed_experts,
-                stop_reason=continuation.stop_reason,
-                num_preempted=continuation.num_preempted,
-                extra_fields=dict(continuation.extra_fields),
+            return await self._normal_fallback(
+                call_kwargs,
+                _counter_fields(**operation_metrics),
+                reason=str(error_reason),
+                cache_key=key,
             )
-            self._merge_policy_versions(output.extra_fields, score_output.extra_fields)
 
         await self._store_output(key, output)
-        return _merge_extra_fields(output, counters)
+        return _merge_extra_fields(
+            output,
+            _counter_fields(
+                spec_cache_hits=1,
+                spec_version_newer_verify=1,
+                spec_cache_lookup_ms=lookup_ms,
+                spec_version_check_ms=version_ms,
+            ),
+        )
+
+    async def _normal_fallback(
+        self,
+        call_kwargs: dict[str, Any],
+        counters: dict[str, int | float],
+        *,
+        reason: str,
+        cache_key: str | None = None,
+        with_logprobs: bool = True,
+        count_as_fallback: bool = True,
+    ) -> TokenOutput:
+        started = time.perf_counter()
+        if with_logprobs:
+            output = await self._generate_with_logprobs(call_kwargs)
+        else:
+            output = await self.base_client.generate(**call_kwargs)
+        counters["spec_normal_fallback_ms"] = (
+            float(counters.get("spec_normal_fallback_ms", 0.0)) + (time.perf_counter() - started) * 1000.0
+        )
+        if cache_key is not None and with_logprobs:
+            await self._store_output(cache_key, output)
+        if not count_as_fallback:
+            counters["spec_fallbacks"] = 0
+        return _merge_extra_fields(output, counters, spec_fallback_reason=reason)
 
     async def _generate_with_logprobs(self, call_kwargs: dict[str, Any]) -> TokenOutput:
         request = dict(call_kwargs)
@@ -440,6 +528,10 @@ class SpecRLLLMServerClient:
         digest = hashlib.sha256(array("q", prompt_ids).tobytes())
         digest.update(json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode())
         return digest.hexdigest()
+
+
+def spec_timing_names() -> tuple[str, ...]:
+    return _SPEC_TIMINGS
 
 
 def spec_counter_names() -> tuple[str, ...]:

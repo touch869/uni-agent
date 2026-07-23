@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MalformedRequestError, MessageCodec
 from uni_agent.gateway.session.types import SessionHandle, Trajectory
-from uni_agent.specrl import spec_counter_names
+from uni_agent.specrl import spec_counter_names, spec_timing_names
 
 
 class SessionPhase(str, Enum):
@@ -421,6 +421,8 @@ class GatewaySession:
     def _merge_output_extra_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
         for key in spec_counter_names():
             target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+        for key in spec_timing_names():
+            target[key] = float(target.get(key, 0.0)) + float(source.get(key, 0.0))
 
         min_version = source.get("min_global_steps", source.get("global_steps"))
         max_version = source.get("max_global_steps", source.get("global_steps"))

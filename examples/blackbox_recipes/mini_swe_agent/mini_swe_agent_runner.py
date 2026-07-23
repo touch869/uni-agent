@@ -194,6 +194,13 @@ async def mini_swe_agent_runner(
             len(agent_info.get("submission", "")),
         )
 
+        if str(agent_info.get("exit_status", "")).endswith("Error"):
+            logger.warning(
+                "[sample %d] agent error: %s",
+                sample_index,
+                str(agent_info.get("submission", ""))[:2000],
+            )
+
         # Evaluate reward in the same sandbox
         metadata, eval_timeout = build_reward_context(tools_kwargs)
         t0 = time.perf_counter()

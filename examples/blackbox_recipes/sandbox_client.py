@@ -172,6 +172,18 @@ class SandboxClient:
                         await asyncio.to_thread(sandbox.kill)
                     except Exception:
                         pass
+                elif name is not None:
+                    # Sandbox() can create a named remote instance before failing to
+                    # return locally. Clean it up, then rotate the name for the retry.
+                    try:
+                        await asyncio.to_thread(Sandbox.delete, name)
+                        logger.info("Deleted failed sandbox instance: %s", name)
+                    except Exception as cleanup_exc:
+                        logger.warning("Failed to delete sandbox %s after create error: %s", name, cleanup_exc)
+                    new_name = _resolve_sandbox_name()
+                    if new_name is not None:
+                        name = new_name
+                        sb_kwargs["name"] = name
                 if retry < max_retries - 1:
                     sleep_time = min(30, 2**retry)
                     logger.info("Retrying sandbox creation in %d seconds...", sleep_time)

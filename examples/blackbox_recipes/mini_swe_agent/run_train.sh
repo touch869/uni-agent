@@ -60,6 +60,7 @@ ACTOR_LR="${ACTOR_LR:-1e-6}"
 PROMPT_LENGTH="${PROMPT_LENGTH:-4096}"
 RESPONSE_LENGTH="${RESPONSE_LENGTH:-131072}"
 MAX_MODEL_LEN=$((PROMPT_LENGTH + RESPONSE_LENGTH))
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-${MAX_MODEL_LEN}}"
 
 # ── Rollout parameters ───────────────────────────────────────────────────
 ENGINE="${ENGINE:-vllm}"
@@ -74,6 +75,7 @@ TOP_P="${TOP_P:-1.0}"
 TOP_K="${TOP_K:--1}"
 ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.7}"
 UPDATE_WEIGHTS_BUCKET_MB="${UPDATE_WEIGHTS_BUCKET_MB:-2048}"
+MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-}"
 SPECRL_ENABLED="${SPECRL_ENABLED:-false}"
 SPECRL_BIAS="${SPECRL_BIAS:-0.5}"
 SPECRL_SEED="${SPECRL_SEED:-1234}"
@@ -91,6 +93,7 @@ TRAIN_CP="${TRAIN_CP:-1}"
 OFFLOAD="${OFFLOAD:-True}"
 OPTIMIZER_OFFLOAD_FRACTION="${OFFLOAD_FRACTION:-1.0}"
 USE_MBRIDGE="${USE_MBRIDGE:-True}"
+VANILLA_MBRIDGE="${VANILLA_MBRIDGE:-False}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
 
 # ── Agent parameters ─────────────────────────────────────────────────────
@@ -204,6 +207,7 @@ env_vars = {
         "VERL_LOGGING_LEVEL",
         "RAY_DEDUP_LOGS",
         "PYTHONUNBUFFERED",
+        "TORCH_CUDA_ARCH_LIST",
     )
     if (value := os.environ.get(key)) is not None
 }
@@ -258,7 +262,7 @@ MAIN_CMD=(
     actor_rollout_ref.rollout.prompt_length=${PROMPT_LENGTH} \
     actor_rollout_ref.rollout.response_length=${RESPONSE_LENGTH} \
     actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN} \
-    actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_MODEL_LEN} \
+    actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS} \
     actor_rollout_ref.rollout.temperature=${TEMPERATURE} \
     actor_rollout_ref.rollout.top_p=${TOP_P} \
     actor_rollout_ref.rollout.top_k=${TOP_K} \
@@ -268,7 +272,6 @@ MAIN_CMD=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"' \
-    '+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=align' \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=true' \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true' \
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=${AGENT_MAX_TURNS} \
@@ -295,6 +298,7 @@ MAIN_CMD=(
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
     actor_rollout_ref.actor.megatron.context_parallel_size=${TRAIN_CP} \
     actor_rollout_ref.actor.megatron.use_mbridge=${USE_MBRIDGE} \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
     actor_rollout_ref.ref.megatron.param_offload=${OFFLOAD} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TRAIN_TP} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
@@ -313,6 +317,10 @@ MAIN_CMD=(
     trainer.nnodes=${NNODES} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
 )
+
+if [[ -n "${MAMBA_CACHE_MODE}" ]]; then
+    MAIN_CMD+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=${MAMBA_CACHE_MODE}")
+fi
 
 if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
     MAIN_CMD+=(trainer.total_training_steps=${TOTAL_TRAINING_STEPS})

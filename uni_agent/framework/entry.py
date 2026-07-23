@@ -54,6 +54,12 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         tokenizer=model_config.tokenizer,
         processor=model_config.processor,
         tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
+        base_sampling_params={
+            "temperature": float(config.actor_rollout_ref.rollout.temperature),
+            "top_p": float(config.actor_rollout_ref.rollout.top_p),
+            "top_k": int(config.actor_rollout_ref.rollout.top_k),
+            "max_tokens": int(config.actor_rollout_ref.rollout.response_length),
+        },
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
     )
