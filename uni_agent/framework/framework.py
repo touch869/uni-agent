@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
 import os
 from dataclasses import dataclass, replace
 from functools import partial
+from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
@@ -28,6 +30,12 @@ from .multi_modal_postprocess import compute_multi_modal_inputs, compute_positio
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+# Per-trajectory dump directory. Set via env TRAJ_LOG_DIR (e.g. /tmp/router-trajs).
+# When set, each finalized trajectory is written to <TRAJ_LOG_DIR>/<session_id>/
+# interaction_result.json — mirroring the old UniAgentLoop log_dir behavior so
+# the Ascend experiment matrix can still distinguish runs by log_dir.
+_TRAJ_LOG_DIR = os.getenv("TRAJ_LOG_DIR")
 
 
 def _ray_resource_snapshot() -> str:
@@ -731,7 +739,71 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     extra_fields={**traj.extra_fields, "reward_extra_info": extra},
                 )
             )
+        self._dump_trajectories(session_id, sample_index, session_index, scored_trajectories, sample_fields)
         return scored_trajectories, sample_fields
+
+    @staticmethod
+    def _preview(raw_prompt: object, limit: int = 200) -> str:
+        """One-line preview of a raw prompt for the traj-dump JSON."""
+        if raw_prompt is None:
+            return ""
+        if isinstance(raw_prompt, list):
+            text = " ".join(
+                (m.get("content") if isinstance(m, dict) else str(m))
+                for m in raw_prompt
+                if (isinstance(m, str) or (isinstance(m, dict) and m.get("content") is not None))
+            )
+        else:
+            text = str(raw_prompt)
+        return text[:limit]
+
+    @staticmethod
+    def _dump_trajectories(
+        session_id: str,
+        sample_index: int,
+        session_index: int,
+        trajectories: list[Trajectory],
+        sample_fields: dict[str, object],
+    ) -> None:
+        """Persist finalized trajectories to <TRAJ_LOG_DIR>/<session_id>/interaction_result.json.
+
+        Mirrors the old UniAgentLoop ``log_dir`` output: per-session directory
+        with a readable JSON containing token-level trajectory + reward info.
+        No-op when TRAJ_LOG_DIR is unset (the default), so this is opt-in.
+        """
+        if not _TRAJ_LOG_DIR or not trajectories:
+            return
+        out_dir = Path(_TRAJ_LOG_DIR) / session_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        records = []
+        for traj in trajectories:
+            records.append({
+                "sample_index": sample_index,
+                "session_index": session_index,
+                "num_turns": traj.num_turns,
+                "num_prompt_tokens": len(traj.prompt_ids),
+                "num_response_tokens": len(traj.response_ids),
+                "response_mask_sum": int(sum(traj.response_mask)) if traj.response_mask else 0,
+                "reward_score": traj.reward_score,
+                "reward_info": traj.reward_info,
+                "extra_fields": traj.extra_fields,
+            })
+        save_content = {
+            "session_id": session_id,
+            "trajectories": records,
+            "raw_prompt_preview": OpenAICompatibleAgentFramework._preview(sample_fields.get("raw_prompt")),
+        }
+        try:
+            (out_dir / "interaction_result.json").write_text(
+                json.dumps(save_content, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            logger.info(
+                "[traj-dump] session=%s sample=%d trajectories=%d -> %s",
+                session_id, sample_index, len(records), out_dir / "interaction_result.json",
+            )
+        except OSError as exc:
+            logger.warning("[traj-dump] failed to write %s: %s", out_dir, exc)
 
     async def _score_trajectories(
         self,
