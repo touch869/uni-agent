@@ -162,14 +162,14 @@ async def mini_swe_agent_runner(
 
     try:
         # Run post_setup_cmd if provided (e.g. git checkout correct commit)
-        post_setup_cmd = env_config.get("post_setup_cmd", "")
-        if post_setup_cmd:
-            logger.info("Running post_setup_cmd (%d chars)...", len(post_setup_cmd))
-            r = await sandbox.run(post_setup_cmd, timeout=600)
-            if r.exit_code != 0:
-                logger.warning("post_setup_cmd failed (rc=%d): %s", r.exit_code, r.stdout[:200])
-            else:
-                logger.info("post_setup_cmd done")
+        # post_setup_cmd = env_config.get("post_setup_cmd", "")
+        # if post_setup_cmd:
+        #     logger.info("Running post_setup_cmd (%d chars)...", len(post_setup_cmd))
+        #     r = await sandbox.run(post_setup_cmd, timeout=600)
+        #     if r.exit_code != 0:
+        #         logger.warning("post_setup_cmd failed (rc=%d): %s", r.exit_code, r.stdout[:200])
+        #     else:
+        #         logger.info("post_setup_cmd done")
 
         # Run agent inside sandbox — pipe config via base64-encoded stdin.
         config_b64 = base64.b64encode(json.dumps(task_config).encode()).decode()
@@ -194,11 +194,19 @@ async def mini_swe_agent_runner(
             len(agent_info.get("submission", "")),
         )
 
-        if str(agent_info.get("exit_status", "")).endswith("Error"):
+        exit_status = str(agent_info.get("exit_status", ""))
+        submission = str(agent_info.get("submission", ""))
+        if exit_status.lower().endswith("error"):
             logger.warning(
                 "[sample %d] agent error: %s",
                 sample_index,
-                str(agent_info.get("submission", ""))[:2000],
+                submission[:2000],
+            )
+        elif not submission:
+            logger.warning(
+                "[sample %d] agent produced no submission (exit_status=%s); reward is expected to be zero unless in-place changes pass evaluation",
+                sample_index,
+                exit_status,
             )
 
         # Evaluate reward in the same sandbox
@@ -206,11 +214,12 @@ async def mini_swe_agent_runner(
         t0 = time.perf_counter()
         reward_env = SandboxEnvForReward(sandbox)
         score, eval_result = await evaluate_in_env(reward_env, metadata, eval_timeout)
-        logger.debug(
-            "[sample %d] reward done: score=%s, resolved=%s (%.1fs)",
+        logger.info(
+            "[sample %d] reward: score=%s, resolved=%s, eval_completed=%s (%.1fs)",
             sample_index,
             score,
             eval_result.get("resolved"),
+            eval_result.get("eval_completed"),
             time.perf_counter() - t0,
         )
 

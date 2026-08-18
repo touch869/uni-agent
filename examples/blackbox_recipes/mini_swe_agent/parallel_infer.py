@@ -45,6 +45,23 @@ logger = logging.getLogger(__name__)
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
 _CONFIG_NAME = "swe_agent_blackbox_megatron_v1"
 _DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+_WORKSPACE_ROOT = os.path.dirname(_REPO_ROOT)
+_WORKSPACE_MODEL_PATH = os.path.join(_WORKSPACE_ROOT, "models", "SWE-Lego-Qwen3-8B")
+_WORKSPACE_DATA_PATH = os.path.join(
+    _WORKSPACE_ROOT,
+    "data",
+    "swe_agent",
+    "swe_bench_verified_openyuanrong.parquet",
+)
+_DEFAULT_MODEL_PATH = (
+    _WORKSPACE_MODEL_PATH
+    if os.path.isfile(os.path.join(_WORKSPACE_MODEL_PATH, "config.json"))
+    else "~/models/Qwen3.5-9B"
+)
+_DEFAULT_DATA_PATH = (
+    _WORKSPACE_DATA_PATH if os.path.isfile(_WORKSPACE_DATA_PATH) else "~/data/swe_agent/swe_bench_verified.parquet"
+)
 
 
 # =====================================================================
@@ -114,6 +131,7 @@ def _load_config(
     engine: str,
     prompt_length: int,
     response_length: int,
+    model_context_headroom: int,
     temperature: float,
     top_p: float,
     n: int,
@@ -144,7 +162,7 @@ def _load_config(
     ro.mode = "async"
     ro.prompt_length = prompt_length
     ro.response_length = response_length
-    ro.max_model_len = prompt_length + response_length + 1024
+    ro.max_model_len = prompt_length + response_length + model_context_headroom
     ro.max_num_batched_tokens = ro.max_model_len
     ro.n = n
     ro.temperature = temperature
@@ -255,6 +273,7 @@ def run_inference(
     data_path: str,
     prompt_length: int,
     response_length: int,
+    model_context_headroom: int,
     temperature: float,
     top_p: float,
     n: int,
@@ -276,6 +295,7 @@ def run_inference(
         engine=engine,
         prompt_length=prompt_length,
         response_length=response_length,
+        model_context_headroom=model_context_headroom,
         temperature=temperature,
         top_p=top_p,
         n=n,
@@ -333,18 +353,19 @@ def run_inference(
 
 def main():
     parser = argparse.ArgumentParser(description="Blackbox mini-swe-agent standalone inference")
-    parser.add_argument("--model-path", "--model", type=str, default="~/models/Qwen3.5-9B")
-    parser.add_argument("--data-path", type=str, default="~/data/swe_agent/swe_bench_verified.parquet")
+    parser.add_argument("--model-path", "--model", type=str, default=_DEFAULT_MODEL_PATH)
+    parser.add_argument("--data-path", type=str, default=_DEFAULT_DATA_PATH)
     parser.add_argument("--max-samples", type=int, default=-1)
     parser.add_argument("--prompt-length", type=int, default=4096)
-    parser.add_argument("--response-length", type=int, default=131072)
+    parser.add_argument("--response-length", type=int, default=28672)
+    parser.add_argument("--model-context-headroom", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--engine", type=str, default="vllm", choices=["vllm", "sglang"])
-    parser.add_argument("--tensor-parallel-size", "--tp", type=int, default=4)
+    parser.add_argument("--tensor-parallel-size", "--tp", type=int, default=2)
     parser.add_argument("--nnodes", type=int, default=1)
-    parser.add_argument("--n-gpus-per-node", type=int, default=8)
+    parser.add_argument("--n-gpus-per-node", type=int, default=2)
     parser.add_argument("--gateway-count", type=int, default=1)
     parser.add_argument("--max-concurrent-sessions", type=int, default=8)
     parser.add_argument("--tool-image", type=str, default=_DEFAULT_TOOL_IMAGE)
@@ -360,6 +381,7 @@ def main():
         data_path=args.data_path,
         prompt_length=args.prompt_length,
         response_length=args.response_length,
+        model_context_headroom=args.model_context_headroom,
         temperature=args.temperature,
         top_p=args.top_p,
         n=args.n,

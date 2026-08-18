@@ -48,12 +48,15 @@ class _GatewayActor:
             vision_info_extractor=config.vision_info_extractor,
             vision_info_extractor_kwargs=config.vision_info_extractor_kwargs,
             tool_parser_name=config.tool_parser_name,
+            legacy_bash_tool_fallback=config.legacy_bash_tool_fallback,
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,
             base_sampling_params=config.base_sampling_params,
             allowed_request_sampling_param_keys=config.allowed_request_sampling_param_keys,
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
+        self._max_model_len = config.max_model_len
+        self._max_tokens_per_request = config.max_tokens_per_request
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -241,6 +244,8 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
+            max_model_len=self._max_model_len,
+            max_tokens_per_request=self._max_tokens_per_request,
             metadata=metadata,
         )
         return handle

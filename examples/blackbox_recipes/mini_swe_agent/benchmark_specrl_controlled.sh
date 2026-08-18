@@ -14,9 +14,13 @@ VAL_DATA="${VAL_DATA:-/data1/zpy/workspace/data/swe_agent/swe_bench_verified_ope
 
 REPEATS="${REPEATS:-5}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-30}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-${TOTAL_TRAINING_STEPS}}"
 METRIC_WARMUP_STEPS="${METRIC_WARMUP_STEPS:-5}"
+PROMPT_LENGTH="${PROMPT_LENGTH:-16384}"
 RESPONSE_LENGTH="${RESPONSE_LENGTH:-2048}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 N="${N:-4}"
+AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-1}"
 TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-1}"
 BENCHMARK_SEED="${BENCHMARK_SEED:-1234}"
 TRAIN_NGPUS_PER_NODE="${TRAIN_NGPUS_PER_NODE:-4}"
@@ -27,6 +31,9 @@ ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.45}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
 UPDATE_WEIGHTS_BUCKET_MB="${UPDATE_WEIGHTS_BUCKET_MB:-128}"
 ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD:-true}"
+IGNORE_EOS="${IGNORE_EOS:-true}"
+FULL_DETERMINISM="${FULL_DETERMINISM:-true}"
+ASYNC_SCHEDULING="${ASYNC_SCHEDULING:-false}"
 TRIAL_CLEANUP_SETTLE_SECONDS="${TRIAL_CLEANUP_SETTLE_SECONDS:-30}"
 BENCHMARK_TAG="${BENCHMARK_TAG:-specrl_controlled_$(date +%Y%m%d_%H%M%S)}"
 BENCHMARK_DIR="${BENCHMARK_DIR:-${REPO_ROOT}/outputs/specrl_benchmark/${BENCHMARK_TAG}}"
@@ -63,9 +70,13 @@ validate_inputs() {
     [[ -f "${ANALYZER}" ]] || fail "missing analyzer: ${ANALYZER}"
     [[ "${REPEATS}" =~ ^[1-9][0-9]*$ ]] || fail "REPEATS must be a positive integer"
     [[ "${TOTAL_TRAINING_STEPS}" =~ ^[1-9][0-9]*$ ]] || fail "TOTAL_TRAINING_STEPS must be a positive integer"
+    [[ "${TOTAL_EPOCHS}" =~ ^[1-9][0-9]*$ ]] || fail "TOTAL_EPOCHS must be a positive integer"
     [[ "${METRIC_WARMUP_STEPS}" =~ ^[0-9]+$ ]] || fail "METRIC_WARMUP_STEPS must be a non-negative integer"
+    [[ "${PROMPT_LENGTH}" =~ ^[1-9][0-9]*$ ]] || fail "PROMPT_LENGTH must be a positive integer"
     [[ "${RESPONSE_LENGTH}" =~ ^[1-9][0-9]*$ ]] || fail "RESPONSE_LENGTH must be a positive integer"
+    [[ "${MAX_NUM_BATCHED_TOKENS}" =~ ^[1-9][0-9]*$ ]] || fail "MAX_NUM_BATCHED_TOKENS must be a positive integer"
     [[ "${N}" =~ ^[1-9][0-9]*$ ]] || fail "N must be a positive integer"
+    [[ "${AGENT_MAX_TURNS}" =~ ^[1-9][0-9]*$ ]] || fail "AGENT_MAX_TURNS must be a positive integer"
     [[ "${TRAIN_MAX_SAMPLES}" =~ ^[1-9][0-9]*$ ]] || fail "TRAIN_MAX_SAMPLES must be a positive integer"
     (( REPEATS >= 1 )) || fail "REPEATS must be >= 1"
     (( TOTAL_TRAINING_STEPS > METRIC_WARMUP_STEPS )) || \
@@ -88,6 +99,9 @@ validate_inputs() {
     [[ "${MAX_NUM_SEQS}" =~ ^[1-9][0-9]*$ ]] || fail "MAX_NUM_SEQS must be a positive integer"
     [[ "${UPDATE_WEIGHTS_BUCKET_MB}" =~ ^[1-9][0-9]*$ ]] || fail "UPDATE_WEIGHTS_BUCKET_MB must be a positive integer"
     [[ "${ACTOR_PARAM_OFFLOAD}" == "true" || "${ACTOR_PARAM_OFFLOAD}" == "false" ]] || fail "ACTOR_PARAM_OFFLOAD must be true or false"
+    [[ "${IGNORE_EOS}" == "true" || "${IGNORE_EOS}" == "false" ]] || fail "IGNORE_EOS must be true or false"
+    [[ "${FULL_DETERMINISM}" == "true" || "${FULL_DETERMINISM}" == "false" ]] || fail "FULL_DETERMINISM must be true or false"
+    [[ "${ASYNC_SCHEDULING}" == "true" || "${ASYNC_SCHEDULING}" == "false" ]] || fail "ASYNC_SCHEDULING must be true or false"
     [[ "${TRIAL_CLEANUP_SETTLE_SECONDS}" =~ ^[0-9]+$ ]] || fail "TRIAL_CLEANUP_SETTLE_SECONDS must be a non-negative integer"
 }
 
@@ -118,9 +132,10 @@ run_trial() {
     SPECRL_ENABLED="${enabled}" \
     SPECRL_SEED="${BENCHMARK_SEED}" \
     TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS}" \
-    PROMPT_LENGTH=16384 \
+    TOTAL_EPOCHS="${TOTAL_EPOCHS}" \
+    PROMPT_LENGTH="${PROMPT_LENGTH}" \
     RESPONSE_LENGTH="${RESPONSE_LENGTH}" \
-    MAX_NUM_BATCHED_TOKENS=4096 \
+    MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS}" \
     ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL}" \
     TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES}" \
     VAL_MAX_SAMPLES=1 \
@@ -131,7 +146,7 @@ run_trial() {
     NUM_WARMUP_BATCHES=0 \
     SEPARATE_NUM_WARMUP_BATCHES=0 \
     N="${N}" \
-    AGENT_MAX_TURNS=1 \
+    AGENT_MAX_TURNS="${AGENT_MAX_TURNS}" \
     UPDATE_WEIGHTS_BUCKET_MB="${UPDATE_WEIGHTS_BUCKET_MB}" \
     TORCH_CUDA_ARCH_LIST=8.6 \
     VANILLA_MBRIDGE=True \
@@ -152,9 +167,9 @@ run_trial() {
         "actor_rollout_ref.actor.megatron.grad_offload=${ACTOR_PARAM_OFFLOAD}" \
         "actor_rollout_ref.rollout.calculate_log_probs=true" \
         "actor_rollout_ref.rollout.max_num_seqs=${MAX_NUM_SEQS}" \
-        "actor_rollout_ref.rollout.ignore_eos=true" \
-        "actor_rollout_ref.rollout.full_determinism=true" \
-        "actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=false" \
+        "actor_rollout_ref.rollout.ignore_eos=${IGNORE_EOS}" \
+        "actor_rollout_ref.rollout.full_determinism=${FULL_DETERMINISM}" \
+        "actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=${ASYNC_SCHEDULING}" \
         "~actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn" \
         "~actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm" \
         2>&1 | tee "${trial_dir}/console.log"
@@ -190,8 +205,9 @@ main() {
 
     cleanup
     echo "Benchmark output: ${BENCHMARK_DIR}"
-    echo "Run config: repeats=${REPEATS}, steps=${TOTAL_TRAINING_STEPS}, metric_warmup=${METRIC_WARMUP_STEPS}"
-    echo "Sampling: n=${N}, response_length=${RESPONSE_LENGTH}, train_max_samples=${TRAIN_MAX_SAMPLES}"
+    echo "Run config: repeats=${REPEATS}, steps=${TOTAL_TRAINING_STEPS}, epochs=${TOTAL_EPOCHS}, metric_warmup=${METRIC_WARMUP_STEPS}"
+    echo "Sampling: n=${N}, prompt_length=${PROMPT_LENGTH}, response_length=${RESPONSE_LENGTH}, max_batched_tokens=${MAX_NUM_BATCHED_TOKENS}, train_max_samples=${TRAIN_MAX_SAMPLES}"
+    echo "Agent: max_turns=${AGENT_MAX_TURNS}, ignore_eos=${IGNORE_EOS}, full_determinism=${FULL_DETERMINISM}, async_scheduling=${ASYNC_SCHEDULING}"
     echo "GPU layout: trainer=${TRAIN_NGPUS_PER_NODE} (TP=${TRAIN_TP}), rollout=${ROLLOUT_NGPUS_PER_NODE} (TP=${GEN_TP})"
     echo "Rollout GPU memory utilization: ${ROLLOUT_GPU_MEM_UTIL}"
     echo "Rollout max sequences: ${MAX_NUM_SEQS}"

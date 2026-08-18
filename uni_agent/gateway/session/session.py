@@ -120,6 +120,8 @@ class GatewaySession:
         *,
         prompt_length: int | None = None,
         response_length: int | None = None,
+        max_model_len: int | None = None,
+        max_tokens_per_request: int | None = None,
         metadata: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
@@ -127,6 +129,12 @@ class GatewaySession:
         self._codec = codec
         self._prompt_length = prompt_length
         self._response_length = response_length
+        if max_model_len is not None and max_model_len <= 0:
+            raise ValueError("max_model_len must be positive")
+        self._max_model_len = max_model_len
+        if max_tokens_per_request is not None and max_tokens_per_request <= 0:
+            raise ValueError("max_tokens_per_request must be positive")
+        self._max_tokens_per_request = max_tokens_per_request
         self._metadata = dict(metadata or {})
         self.active_tool_schemas: list[dict[str, Any]] | None = None
         self.message_history: list[dict[str, Any]] = []
@@ -273,6 +281,10 @@ class GatewaySession:
                 if (
                     self._response_length is not None
                     and len(buffer.response_mask) + len(incremental_ids) >= self._response_length
+                ) or (
+                    self._max_model_len is not None
+                    and len(buffer.prompt_ids) + len(buffer.response_ids) + len(incremental_ids)
+                    >= self._max_model_len
                 ):
                     context_ids = buffer.prompt_ids + buffer.response_ids
                     return EncodedData(
@@ -306,12 +318,38 @@ class GatewaySession:
             buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
-        sampling_params = self._codec.build_sampling_params(payload)
+        remaining_context_budget = (
+            self._max_model_len - len(context_ids) if self._max_model_len is not None else None
+        )
         remaining_response_budget = (
             self._response_length - len(buffer.response_mask) if self._response_length is not None else None
         )
+        if (remaining_context_budget is not None and remaining_context_budget <= 0) or (
+            remaining_response_budget is not None and remaining_response_budget <= 0
+        ):
+            return EncodedData(
+                buffer=buffer,
+                context_ids=context_ids,
+                sampling_params={},
+                messages=list(messages),
+                tools=tools,
+                image_data=image_data,
+                video_data=video_data,
+                materialized_trajectory=None,
+                length_exhausted_trajectory=self._build_materialized_trajectory(
+                    active=buffer,
+                    extra_fields={"finish_reason": "length"},
+                ),
+            )
+        sampling_params = self._codec.build_sampling_params(payload)
+        if self._max_tokens_per_request is not None:
+            requested_max_tokens = sampling_params.get("max_tokens", self._max_tokens_per_request)
+            sampling_params["max_tokens"] = min(requested_max_tokens, self._max_tokens_per_request)
         if remaining_response_budget is not None and "max_tokens" in sampling_params:
             sampling_params["max_tokens"] = min(sampling_params["max_tokens"], remaining_response_budget)
+        if remaining_context_budget is not None:
+            requested_max_tokens = sampling_params.get("max_tokens", remaining_context_budget)
+            sampling_params["max_tokens"] = min(requested_max_tokens, remaining_context_budget)
         return EncodedData(
             buffer=buffer,
             context_ids=context_ids,

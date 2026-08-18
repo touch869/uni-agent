@@ -50,18 +50,30 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
 
+    legacy_bash_tool_fallback = bool(af_cfg.get("legacy_bash_tool_fallback", False))
+    base_sampling_params = {
+        "temperature": float(config.actor_rollout_ref.rollout.temperature),
+        "top_p": float(config.actor_rollout_ref.rollout.top_p),
+        "top_k": int(config.actor_rollout_ref.rollout.top_k),
+        "max_tokens": int(config.actor_rollout_ref.rollout.response_length),
+    }
+    if legacy_bash_tool_fallback and str(config.actor_rollout_ref.rollout.name) == "vllm":
+        base_sampling_params.update(
+            stop=["</bash>"],
+            include_stop_str_in_output=True,
+        )
+
     gateway_actor_config = GatewayActorConfig(
         tokenizer=model_config.tokenizer,
         processor=model_config.processor,
         tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
-        base_sampling_params={
-            "temperature": float(config.actor_rollout_ref.rollout.temperature),
-            "top_p": float(config.actor_rollout_ref.rollout.top_p),
-            "top_k": int(config.actor_rollout_ref.rollout.top_k),
-            "max_tokens": int(config.actor_rollout_ref.rollout.response_length),
-        },
+        legacy_bash_tool_fallback=legacy_bash_tool_fallback,
+        apply_chat_template_kwargs=dict(af_cfg.get("apply_chat_template_kwargs", {}) or {}),
+        base_sampling_params=base_sampling_params,
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
+        max_model_len=config.actor_rollout_ref.rollout.max_model_len,
+        max_tokens_per_request=af_cfg.get("max_tokens_per_request"),
     )
 
     return GatewayManager(
