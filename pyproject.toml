@@ -101,6 +101,9 @@ verl = [
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
 ]
+"uni_agent.llm_router" = [
+  "configs/*.yaml",
+]
 
 [tool.pytest.ini_options]
 markers = [
