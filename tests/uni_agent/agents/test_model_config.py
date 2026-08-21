@@ -1,5 +1,3 @@
-import pytest
-
 from uni_agent.agents.base import ModelConfig
 
 
