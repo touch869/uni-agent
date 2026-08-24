@@ -5,7 +5,7 @@
 # `docker exec hgq-verl-ascend`, --network host). 48 NPUs, TP=4 -> 12 replicas.
 #
 # rl-insight server stays up for the whole matrix; the Ray cluster is rebuilt
-# per attempt: clean all nodes -> ray up -> run_infer.sh (retry until "=> Resolved").
+# per attempt: clean all nodes -> ray up -> run_infer.sh (retry until "inference summary").
 
 set -euo pipefail
 
@@ -36,7 +36,6 @@ DATASET=/root/hgq/ws/data/swe_bench_train_model.parquet
 MAX_SAMPLES=64
 RES_LEN=8000
 GPU_MEM_UTIL=0.8
-AGENT_MAX_TURNS=150
 
 export HCCL_IF_BASE_PORT=${HCCL_IF_BASE_PORT:-26100}
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
@@ -44,9 +43,6 @@ export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 # AKernel sandbox creds, passed via `docker exec -e` (escape shell metachars).
 : "${AKERNEL_SERVER_ADDRESS:?Set AKERNEL_SERVER_ADDRESS}"
 : "${AKERNEL_TOKEN:?Set AKERNEL_TOKEN}"
-
-TOOL_IMAGE_REGISTRY="${TOOL_IMAGE_REGISTRY:-xx.xx.xx.xx:xxxx}"
-TOOL_IMAGE="${TOOL_IMAGE_REGISTRY}/openyuanrong/claude-code-tool:latest"
 
 # =====================================================================
 # Helpers
@@ -77,7 +73,6 @@ worker_exec_with_env() {
         -e RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 \
         -e ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
         -e PYTHONHASHSEED=0 \
-        -e AGENT_MAX_TURNS=${AGENT_MAX_TURNS} \
         ${WORKER_CONTAINER} $*"
 }
 
@@ -112,7 +107,7 @@ step1_ssh_check() {
 # Per-attempt cluster teardown / bring-up (all 6 nodes)
 # =====================================================================
 # Cleanup order: kill driver -> ray stop -> kill stray ray:: -> fuser (davinci + :9092).
-KILL_DRIVER_CMD="ps aux | grep -E 'run_infer[.]sh|parallel_infer[.]py' | grep -v grep | awk '{print \$2}' | xargs -r kill -9 2>/dev/null || true"
+KILL_DRIVER_CMD="ps aux | grep -E 'run_infer[.]sh|parallel_infer_verl_kvc[.]py' | grep -v grep | awk '{print \$2}' | xargs -r kill -9 2>/dev/null || true"
 KILL_RAY_CMD="ps aux | grep -E 'ray[:][:]' | grep -v grep | awk '{print \$2}' | xargs -r kill -9 2>/dev/null || true"
 FUSER_CMD="bash -lc 'fuser -k /dev/davinci* 2>/dev/null || true; fuser -k 9092/tcp 2>/dev/null || true'"
 NODE_CLEANUP="${KILL_DRIVER_CMD}; ray stop -f 2>/dev/null || true; ${KILL_RAY_CMD}; ${FUSER_CMD}"
@@ -124,7 +119,7 @@ clean_all_nodes() {
 }
 
 setup_ray_cluster() {
-    log "  starting ray cluster (nnodes=${NNODES}), AGENT_MAX_TURNS=${AGENT_MAX_TURNS}"
+    log "  starting ray cluster (nnodes=${NNODES})"
     export AKERNEL_TUNNEL_SSL_VERIFY="${AKERNEL_TUNNEL_SSL_VERIFY:-0}"
     export ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
     export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
@@ -187,6 +182,7 @@ run_experiment() {
         bash "${REPO_ROOT}/examples/llm_router/run_infer.sh" \
             --model-path "${MODEL}" \
             --data-path "${DATASET}" \
+            --task-config "${REPO_ROOT}/examples/llm_router/task_config_openyuanrong.yaml" \
             --device ascend \
             --nnodes "${NNODES}" \
             --n-gpus-per-node "${N_GPUS_PER_NODE}" \
@@ -197,9 +193,7 @@ run_experiment() {
             --max-samples "${MAX_SAMPLES}" \
             --n 8 \
             --shuffle \
-            --max-concurrent-sessions "${CONCURRENCY}" \
-            --max-turns "${AGENT_MAX_TURNS}" \
-            --tool-image "${TOOL_IMAGE}" \
+            --concurrency "${CONCURRENCY}" \
             --kv-events \
             "$@" > "${log_file}" 2>&1 || log "  (run failed, will retry)"
     done
@@ -210,7 +204,7 @@ step3_matrix() {
 
     local concurrencys=(16 24 32 128 192 256)
     local contexts=(16384 32768 64000 128000)
-    export TARGET="Resolved"
+    export TARGET="inference summary"
 
     for CONCURRENCY in "${concurrencys[@]}"; do
         for CONTEXT in "${contexts[@]}"; do

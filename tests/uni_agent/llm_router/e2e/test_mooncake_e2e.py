@@ -14,11 +14,12 @@
 
 """E2E test: KVCAware router + mooncake via run_infer.sh.
 
-Launches ``run_infer.sh`` with ``--enable-mooncake``,
+Launches ``run_infer.sh`` (drives ``parallel_infer_verl_kvc.py`` with the
+simulated-sandbox runner swapped in) with ``--enable-mooncake``,
 starts mooncake_master, waits for completion, then checks:
   1. MooncakeStoreConnector created on vLLM replicas
   2. Routing decisions produced ("routed to server")
-  3. Mean RM Score printed (end-to-end completion)
+  3. mean rm_score printed (end-to-end completion)
   4. No TCP transport errors (no writeBody/batch_put -800 failures)
   5. External prefix cache hit observed (cross-replica KV sharing working)
 
@@ -41,6 +42,7 @@ _RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "run_infer.sh
 _SIMULATED_RUNNER_FQN = "tests.uni_agent.llm_router.e2e.utils.simulated_sandbox.simulated_runner"
 _MODEL = os.environ.get("VLLM_MODEL", "/data1/models/Qwen/Qwen3-4B-Instruct-2507")
 _DATASET = os.environ.get("SWEBENCH_DATASET", "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
+_TASK_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "task_config_openyuanrong.yaml")
 _LOG_DIR = "/tmp/e2e_mooncake_logs"
 
 # Mooncake daemon ports — the test brings up its own metadata server + master
@@ -95,8 +97,8 @@ def _run_infer_with_mooncake(timeout: int = 600) -> str:
         _DATASET,
         "--simulated-runner-fqn",
         _SIMULATED_RUNNER_FQN,
-        "--max-turns",
-        "8",
+        "--task-config",
+        _TASK_CONFIG,
         "--n-gpus-per-node",
         str(num_gpus),
         "--tensor-parallel-size",
@@ -169,8 +171,8 @@ class TestMooncakeRouterE2E:
         Description: run full agent loop with router + mooncake, verify:
           - MooncakeStoreConnector created
           - routing decisions produced
-          - Mean RM Score printed
-          - trajectory logs produced (agent loop actually ran)
+          - mean rm_score printed
+          - inference summary printed (agent loop actually ran)
           - no TCP transport errors (no writeBody/batch_put -800)
           - External prefix cache hit observed
         """
@@ -183,10 +185,10 @@ class TestMooncakeRouterE2E:
         assert "routed to server" in log, "No routing decisions in log"
 
         # 3. End-to-end completion
-        assert "Mean RM Score" in log, "run_infer.sh did not complete"
+        assert "mean rm_score" in log, "run_infer.sh did not complete"
 
-        # 4. Trajectory logs produced (log_dir from agent config yaml)
-        assert "=> Resolved" in log, "Runner did not report a resolve summary (no successful sessions)"
+        # 4. Agent loop actually ran (inference summary block at the end)
+        assert "inference summary" in log, "run_infer.sh did not finish (no inference summary)"
 
         # 5. No TCP transport errors
         tcp_errors = log.count("writeBody failed") + log.count("batch_put failed")

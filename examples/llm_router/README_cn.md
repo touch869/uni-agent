@@ -1,10 +1,13 @@
 # llm-router 推理快速开始
 
-Last updated: 08/07/2026
+Last updated: 08/24/2026
 
 ## 这是什么
 
-本示例在 verl 的 **KV-cache-aware router**（`kvcaware`）上运行 SWE-bench agentic 推理,使用 uni-agent 的 **blackbox 框架**:vLLM 副本位于 kvcaware 路由器之后(KV-cache 命中率 + 负载感知的调度),gateway 池在 AKernel 远程沙箱中驱动 `claude_code` agent 会话,reward worker 上报 resolve rate。不启动 trainer。
+本示例在 verl 的 **KV-cache-aware router**（`kvcaware`）上运行 SWE-bench agentic 推理,router 由 `uni_agent.llm_router` 托管,通过 FQN 注入 verl
+（`rollout.router_config_path` + `pkg://` router YAML,无需 verl 侧注册）。
+会话跑在 uni-agent 的 **framework + task_runner 路径**（`uni_agent.framework.task_runner.run_task`）:vLLM 副本位于 kvcaware 路由器之后
+（KV-cache 命中率 + 负载感知调度),gateway 池在 openyuanrong 远程沙箱中驱动 `react` agent 会话,每个任务的 reward 会上报回框架。不启动 trainer。
 
 核心组件:
 - `KVCAwareBalancer` — 路由框架,管理组件生命周期与路由决策
@@ -12,22 +15,24 @@ Last updated: 08/07/2026
 - `Strategy` — 评分策略,综合 KV-cache 命中率与负载
 - `Store` — 单例存储,缓存采集到的指标与 KV block 状态
 
-agent runner / reward / dataset 代码复用自已安装的 `uni-agent` 包
-(`examples.blackbox_recipes.claude_code.*`)。
+task runner / reward / dataset 代码复用自已安装的 `uni-agent` 包
+(`uni_agent.tasks`、`uni_agent.sandbox`)。
 
 ## 前置条件
 
-1. 本仓库(verl, router-dev)和 `pip install uni-agent`。
-2. 一个 AKernel 远程沙箱端点(`AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN`)。
-3. 数据集 parquet(SWE-bench verified)。默认路径:
-   `examples/llm_router/swe_bench_verified_modal.parquet` — 使用
-   uni-agent 的 `examples/data_preprocess/swe_bench_verified.py` 生成,
-   或将 `--data-path` 指向任意兼容的 parquet。
+1. 本仓库(含 `verl` submodule)并 `pip install -e .`,使 `uni_agent` 包(托管
+   router)可解析。
+2. 一个 AKernel 远程沙箱端点(`AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN`),
+   以及沙箱节点可达的镜像——openyuanrong 请使用已 SWR 映射的 parquet
+   (`sandbox.image` 形如 `swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/...:v2`)。
+3. 数据集 parquet(SWE-bench verified)。用 `--data-path` 指向任意兼容的
+   parquet(可用 uni-agent 的 `examples/data_preprocess/swe_bench_verified.py` 生成)。
 
 ## 运行
 
 `run_infer.sh` 是一个薄包装:导出 Ray worker 环境变量(AKernel 凭据 +
-可观测性 env),然后把所有 CLI flag 透传给 `parallel_infer.py`。完整 flag
+可观测性 env),然后把所有 CLI flag 透传给 `parallel_infer_verl_kvc.py`。
+`--task-config` 必填——它按行选择 task / agent / model 配置。完整 flag
 列表与默认值用 `--help` 查看:
 
 ```bash
@@ -35,39 +40,51 @@ bash examples/llm_router/run_infer.sh --help
 
 # Smoke test (1 sample, kv-events on)
 bash examples/llm_router/run_infer.sh \
-    --model-path /path/to/Qwen3.5-9B --max-samples 1 --kv-events
+    --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
+    --data-path /path/to/swe_bench.parquet \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
+    --max-samples 1 --kv-events
 
-# 全量 8-GPU data-parallel
+# 全量运行(省略 --max-samples 即跑整个数据集)
 bash examples/llm_router/run_infer.sh \
-    --model-path /path/to/Qwen3.5-9B \
-    --tensor-parallel-size 2 --n-gpus-per-node 8 --max-samples -1 --kv-events
+    --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
+    --data-path /path/to/swe_bench.parquet \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
+    --tensor-parallel-size 2 --n-gpus-per-node 8 --kv-events
 
 # 带 mooncake 跨副本 KV 共享(mooncake master 单独起)
 bash examples/llm_router/run_infer.sh \
-    --model-path /path/to/Qwen3.5-9B --enable-mooncake --kv-events
+    --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
+    --data-path /path/to/swe_bench.parquet \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
+    --enable-mooncake --kv-events
 
 # Ascend（vllm-ascend）后端
 bash examples/llm_router/run_infer.sh \
-    --model-path /path/to/Qwen3.5-9B --device ascend --enable-mooncake
+    --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
+    --data-path /path/to/swe_bench.parquet \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
+    --device ascend --enable-mooncake
 ```
 
 主要 CLI flag(完整列表见 `--help`):
 
 | Flag | 默认值 | 说明 |
 |------|---------|------|
-| `--model-path` | `~/models/Qwen3.5-9B` | 模型路径 |
-| `--data-path` | `<example>/swe_bench_verified_modal.parquet` | 数据集 parquet |
-| `--max-samples` | `-1` | 运行的样本数(-1 = 全部) |
+| `--data-path` | `~/data/swe_agent/swe_bench_verified.parquet` | 数据集 parquet |
+| `--model-path` / `--model` | `~/models/Qwen3-Coder-30B-A3B-Instruct` | 模型路径 |
+| `--task-config` | (必填) | YAML task 配置(`- name:` 条目),按行驱动每个 sample |
+| `--max-samples` / `--limit` | 全部 | 运行的样本数(省略即全部) |
+| `--n` | `1` | 每个实例的 rollout 会话数 |
 | `--shuffle` / `--seed` | 关 / `42` | 采样前打乱数据,并指定可复现的随机种子 |
-| `--prompt-length` / `--response-length` | `4096` / `131072` | Token 长度 |
-| `--max-model-len` | config 原生上限 | vLLM 最大上下文长度;设置后 prompt 长度变为 `max_model_len - response_length - 100` |
-| `--n` | `1` | 每个样本的会话数 |
+| `--prompt-length` / `--response-length` | `4096` / `8192` | Token 长度 |
+| `--max-model-len` | 引擎钳制 | vLLM 最大上下文长度 |
 | `--tensor-parallel-size` / `--n-gpus-per-node` / `--nnodes` | `4` / `8` / `1` | 并行度 |
-| `--gateway-count` / `--max-concurrent-sessions` | `1` / `128` | Gateway 池 / 会话并发度 |
-| `--gpu-memory-utilization` | `0.8` | vLLM GPU 显存利用率(0-1) |
-| `--tool-image` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest` | 沙箱 sidecar 工具镜像 |
-| `--run-timeout` | `7200` | 每个会话沙箱运行超时(秒) |
-| `--max-turns` | `100` | 每个会话的最大 agent 轮次 |
+| `--concurrency` | env `GLOBAL_CONCURRENCY` | 最大在途 gateway 会话数 |
+| `--gateway-count` / `--tool-parser` | `4` / `qwen3_coder` | Gateway 池 / 工具调用解析器 |
+| `--gpu-memory-utilization` | `0.9` | vLLM GPU 显存利用率(0-1) |
+| `--router-config-path` | `pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml` | 打包的 router YAML |
+| `--max-num-seqs` | `256` | 每个引擎的最大并发序列数 |
 | `--kv-events` | 关 | 启用 vLLM kv-events(kvcaware 负载信号) |
 | `--enable-mooncake` / `--mooncake-config-path` | 关 / `mooncake_config.json` | 跨副本 KV 共享 |
 | `--device` | `gpu` | `gpu` 或 `ascend`(选择 mooncake connector 类) |
@@ -88,19 +105,33 @@ bash examples/llm_router/run_infer.sh \
 
 ## 可观测性
 
-路由器日志(`vllm-evidence`、`router-dispatch`、`score():`、`is-overload`)
-由 `plot_metrics.py` 解析为 24 面板时间对齐图:
+运行日志携带 router 的调度证据——balancer 的 `routed to server` 行、strategy
+的 `score(): COMBINED` 日志、kv-events collector 指标。结束时
+`parallel_infer_verl_kvc.py` 打印 `inference summary` 块(mean rm_score 与
+逐 session 明细),设置 `--result-path` 时会另写一个 JSON 结果文件。
 
-```bash
-python examples/llm_router/plot_metrics.py /path/to/run.log
-```
+## 实验矩阵
+
+两个 driver 扫一组 sticky-vs-kvcaware 矩阵(并发 × 上下文),每次运行重试
+直到日志中出现 `inference summary` 成功哨兵。两者都硬编码 `--device ascend`
+（vllm-ascend）与 `--kv-events`;kvcaware 单元把 `--load-threshold` 扫过
+`0.1..0.9`。
+
+- `ascend-exps.sh` — 单节点(16 NPU,TP=4 → 4 replicas)。先改文件顶部的
+  `MODEL` / `DATASET` / `MAX_SAMPLES`,再 `bash examples/llm_router/ascend-exps.sh`。
+- `multi-node-ascend-exps.sh` — 6 节点(本机 = Ray head + 5 个免密 SSH worker,
+  每个通过 `docker exec hgq-verl-ascend` 进入;48 NPU / TP=4 → 12 replicas)。
+  每次尝试会重建并拆除 Ray 集群。先改 `WORKERS[]` 主机列表与 `MODEL` /
+  `DATASET`。
+
+`run_infer.sh` 是底层唯一入口;两个 driver 都只是循环调用它。
 
 ## 注意事项
 
-- blackbox runner 需要一个 AKernel 远程沙箱;没有它会快速失败。旧的
-  swe-rex localdocker/simulated agent 配置已在 blackbox 框架迁移中被移除。
-- 数据集 schema 必须携带 `extra_info.tools_kwargs`,包含 `env.image` /
-  `reward` 字段(uni-agent blackbox 格式)。如果你的 parquet 早于该格式,
-  请使用 uni-agent 的 data_preprocess 脚本重新生成。
-- 请保持 `--prompt-length + --response-length` 明显低于模型的原生上下文长度;
-  `max_model_len` 会被钳制到配置文件声明的值,确保不超过模型上下文。
+- task runner 需要一个 AKernel 远程沙箱(openyuanrong);没有它会快速失败。
+  旧的 blackbox-recipes / swe-rex agent 配置已在框架迁移中移除。
+- 数据集 schema 必须携带 `extra_info.tools_kwargs` 中的 `task` dict(task
+  runner 据此解析任务)。如果你的 parquet 早于该格式,请使用 uni-agent 的
+  data_preprocess 脚本重新生成。
+- 让 task 配置里的 `max_total_tokens` 明显低于 `--max-model-len`;react agent
+  按它对每会话 token 做预算,vLLM 会拒绝超过引擎上下文的请求。

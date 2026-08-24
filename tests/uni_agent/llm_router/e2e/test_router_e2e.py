@@ -14,12 +14,12 @@
 
 """E2E test: KVCAware router via run_infer.sh — full agent loop with routing.
 
-Launches ``run_infer.sh`` (KVCAware router is hardcoded in parallel_infer.py),
-waits for completion, then checks:
+Launches ``run_infer.sh`` (drives ``parallel_infer_verl_kvc.py`` with the
+simulated-sandbox runner swapped in), waits for completion, then checks:
   1. Routing decisions produced ("routed to server")
   2. COMBINED scoring (not falling back to random)
-  3. Mean RM Score printed (end-to-end completion)
-  4. Trajectory logs produced (agent loop actually ran)
+  3. mean rm_score printed (end-to-end completion)
+  4. Inference summary printed (agent loop actually ran)
 
 This is a GPU test (needs real vLLM + GPU + model + dataset).
 """
@@ -41,6 +41,7 @@ _RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "run_infer.sh
 _SIMULATED_RUNNER_FQN = "tests.uni_agent.llm_router.e2e.utils.simulated_sandbox.simulated_runner"
 _MODEL = os.environ.get("VLLM_MODEL", "/data1/models/Qwen/Qwen3-4B-Instruct-2507")
 _DATASET = os.environ.get("SWEBENCH_DATASET", "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
+_TASK_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "task_config_openyuanrong.yaml")
 _LOG_DIR = "/tmp/e2e_router_logs"
 
 
@@ -60,10 +61,10 @@ def _run_infer(timeout: int = 600) -> str:
         _MODEL,
         "--data-path",
         _DATASET,
+        "--task-config",
+        _TASK_CONFIG,
         "--simulated-runner-fqn",
         _SIMULATED_RUNNER_FQN,
-        "--max-turns",
-        "8",
         "--n-gpus-per-node",
         str(num_gpus),
         "--tensor-parallel-size",
@@ -99,8 +100,8 @@ class TestKVCAwareRouterE2E:
         Description: run full agent loop with --router-config-path, verify:
           - routing decisions ("routed to server" >= 1)
           - COMBINED scoring (not random fallback)
-          - Mean RM Score printed (end-to-end completion)
-          - trajectory logs produced (interaction_result.json exists)
+          - mean rm_score printed (end-to-end completion)
+          - inference summary printed (agent loop actually ran)
         """
         log = _run_infer()
 
@@ -113,7 +114,7 @@ class TestKVCAwareRouterE2E:
         assert "COMBINED" in log, "No COMBINED scoring — strategy may have failed"
 
         # 3. End-to-end completion
-        assert "Mean RM Score" in log, "run_infer.sh did not complete (no RM Score)"
+        assert "mean rm_score" in log, "run_infer.sh did not complete (no rm_score)"
 
-        # 4. Trajectories landed in TransferQueue (framework summary line)
-        assert "=> Resolved" in log, "Runner did not report a resolve summary (no successful sessions)"
+        # 4. Agent loop actually ran (inference summary block at the end)
+        assert "inference summary" in log, "run_infer.sh did not finish (no inference summary)"
