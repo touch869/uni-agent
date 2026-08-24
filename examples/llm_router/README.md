@@ -27,10 +27,11 @@ package (`uni_agent.tasks`, `uni_agent.sandbox`).
 1. This repo (uni-agent repo) with the `verl` submodule initialized, plus
    `pip install -e .` so the `uni_agent` package (which now hosts the router)
    resolves.
-2. An AKernel remote-sandbox endpoint (`AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN`)
-   and a sandbox image reachable from the sandbox nodes — for openyuanrong, use
-   a parquet whose `sandbox.image` is already SWR-mapped
-   (`swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/...:v2`).
+2. An AKernel remote-sandbox endpoint (`AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN`).
+   The bundled `task_config_openyuanrong.yaml` maps the dataset's provider-agnostic
+   `swebench/**` images to the openyuanrong SWR registry
+   (`swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2`) via
+   `sandbox.image_map`, so a plain SWE-bench parquet works as-is.
 3. A dataset parquet (SWE-bench verified). Point `--data-path` at any compatible
    parquet (generate with uni-agent's `examples/data_preprocess/swe_bench_verified.py`).
 

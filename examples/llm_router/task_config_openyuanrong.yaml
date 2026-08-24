@@ -2,9 +2,12 @@
   sandbox:
     provider: openyuanrong
     runtime_timeout: 7200
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     # image 由数据集每行 sample 的 sandbox.image 注入（provider-agnostic 的
-    # swebench/sweb.eval.x86_64.<id>），OpenyuanrongSandbox.from_config 会自动映射为
-    # swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/...:v2。
+    # swebench/sweb.eval.x86_64.<id>），SandboxConfig.image_map 在此映射为
+    # swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/<id>:v2。
     sandbox_kwargs:
       cpu: 1000
       memory: 2048

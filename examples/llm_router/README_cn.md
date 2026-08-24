@@ -22,9 +22,11 @@ task runner / reward / dataset 代码复用自已安装的 `uni-agent` 包
 
 1. 本仓库(含 `verl` submodule)并 `pip install -e .`,使 `uni_agent` 包(托管
    router)可解析。
-2. 一个 AKernel 远程沙箱端点(`AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN`),
-   以及沙箱节点可达的镜像——openyuanrong 请使用已 SWR 映射的 parquet
-   (`sandbox.image` 形如 `swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/...:v2`)。
+2. 一个 AKernel 远程沙箱端点(`AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN`)。
+   随附的 `task_config_openyuanrong.yaml` 通过 `sandbox.image_map` 把数据集里
+   provider-agnostic 的 `swebench/**` 镜像映射到 openyuanrong SWR 仓库
+   (`swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2`),
+   因此普通 SWE-bench parquet 可直接使用。
 3. 数据集 parquet(SWE-bench verified)。用 `--data-path` 指向任意兼容的
    parquet(可用 uni-agent 的 `examples/data_preprocess/swe_bench_verified.py` 生成)。
 
