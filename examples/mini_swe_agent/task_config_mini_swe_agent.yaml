@@ -47,9 +47,7 @@
     runtime_timeout: 7200
     image_map:
       - from: "swebench/**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**"
-      - from: "swerebench/**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swerebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
       proxy_port: 38197
       mounts:
