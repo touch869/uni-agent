@@ -10,6 +10,8 @@ from uni_agent.framework.task_runner import (
 from uni_agent.gateway.session import SessionHandle
 from uni_agent.tasks import TaskConfig, TaskResult
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 def test_rewrite_gateway_url_replaces_host_with_tunnel_port():
     assert _rewrite_gateway_url("http://gateway.example:40169/sessions/abc/v1", 38197) == (

@@ -11,6 +11,8 @@ import pytest
 from examples.gateway import debug_launcher
 from uni_agent.gateway.session import SessionHandle, Trajectory
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
     """Trajectory output records keep every training-visible field and can be

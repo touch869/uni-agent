@@ -48,13 +48,12 @@ jobs:
           cd SWE-bench
           pip install -e .
 
-      # 4. Test with pytest
+      # 4. Test with pytest (gate: level0 + cpu only — fast smoke tests, no GPU)
       - name: Test with pytest
         run: |
           pip install pytest pytest-cov
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
-          pytest tests/ --cov=./ --cov-report=xml --cov-report=term
-        continue-on-error: true  # allow failed node
+          pytest tests/ -m "level0 and cpu" --cov=./ --cov-report=xml --cov-report=term
 
       # 5. Upload coverage to Codecov
       - name: Upload coverage to Codecov

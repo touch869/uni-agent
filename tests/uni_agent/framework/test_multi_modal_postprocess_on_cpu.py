@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from tests.uni_agent.support import FakeProcessor
+
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 
 
 def test_compute_multi_modal_inputs_returns_empty_dict_without_processor():

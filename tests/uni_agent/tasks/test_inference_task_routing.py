@@ -4,6 +4,8 @@ import pytest
 
 from uni_agent.tasks import TaskConfigResolver
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 def test_resolver_loads_every_named_entry(tmp_path):
     config_path = tmp_path / "tasks.yaml"

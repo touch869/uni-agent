@@ -1,4 +1,8 @@
+import pytest
+
 from uni_agent.agents.base import ModelConfig
+
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 
 
 def test_unconfigured_sampling_params_delegate_to_endpoint():
