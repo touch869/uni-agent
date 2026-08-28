@@ -112,9 +112,11 @@ uni_agent = ["version/*"]
 
 [tool.pytest.ini_options]
 markers = [
-    "cpu: run on cpu backend",
-    "gpu: run on gpu backend",
+    "cpu: runs on CPU (no GPU required)",
+    "gpu: needs a real GPU + vLLM/model process",
     "npu: run on npu backend",
-    "level0: mark level0 case, always run in CI",
-    "level1: mark level1 case, full test, not included in CI"
+    "ut: pure unit test, no external process/ray/network/real model",
+    "st: system/integration test, starts real ray/vLLM/mooncake subsystems",
+    "level0: smoke test, always run and fast, covers core paths",
+    "level1: full regression test, slower, covers edge cases and integration"
 ]
