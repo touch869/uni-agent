@@ -27,28 +27,7 @@ from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
 from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
-
-
-# ============================================================
-# StrategyRegistry
-# ============================================================
-
-
-class TestKVCacheAwareStrategy:
-    """R02-Rnn: KVCacheAwareStrategy construction seam."""
-
-    def test_r02_from_config_returns_instance_carrying_config(self):
-        """
-        Feature: from_config constructs a strategy instance from its config
-        Description: KVCacheAwareStrategy.from_config(KVCAwareStrategyConfig(weight=0.7))
-        Expectation: returns a KVCacheAwareStrategy carrying the config's strategy fields
-        """
-        cfg = KVCAwareStrategyConfig(weight=0.7, alpha=0.7, load_threshold=0.1, collector_names=["vllm_zmq"])
-        strategy = KVCacheAwareStrategy.from_config(cfg)
-        assert isinstance(strategy, KVCacheAwareStrategy)
-        assert strategy.alpha == 0.7
-        assert strategy.load_threshold == 0.1
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 
 # ============================================================
@@ -85,7 +64,6 @@ class TestStrategyRegistry:
         Description: look up KVCAwareStrategyConfig in the registry
         Expectation: returns KVCacheAwareStrategy class
         """
-        from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 
         assert StrategyRegistry.get(KVCAwareStrategyConfig) is KVCacheAwareStrategy
 

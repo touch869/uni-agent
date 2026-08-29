@@ -4,3 +4,4 @@ pytest_asyncio
 fastapi
 uvicorn
 cachetools
+ray==2.54.1
