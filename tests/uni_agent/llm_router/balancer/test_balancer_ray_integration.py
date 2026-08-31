@@ -39,7 +39,7 @@ ROUTER_CONFIG_PATH = os.path.join(
     os.path.dirname(_llm_router_pkg.__file__), "configs", "kvc_aware_router.yaml"
 )
 
-pytestmark = [pytest.mark.st, pytest.mark.cpu, pytest.mark.level0]
+pytestmark = [pytest.mark.st, pytest.mark.cpu]
 
 
 @ray.remote
