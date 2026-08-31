@@ -69,15 +69,13 @@ class _FakeCollectorManager:
             c.stop()
 
 
-def _router_config(weight: float = 1.0):
+def _router_config():
     """Build a minimal router_config (OmegaConf) the Balancer accepts."""
     return OmegaConf.create(
         {
             "strategies": [
                 {
                     "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                    "weight": weight,
-                    "collector_names": ["vllm_zmq", "sticky_stat", "inflight_stat"],
                 },
             ],
         }
@@ -103,7 +101,6 @@ def _make_balancer(servers=None, max_num_seqs=None):
         servers = {"s0": "h0", "s1": "h1"}
     balancer = KVCAwareBalancer(servers, _router_config(), provider_factory=_FakeCollectorManager)
     if max_num_seqs is not None:
-        for strategy, _ in balancer._strategies:
-            if hasattr(strategy, "set_capacity"):
-                strategy.set_capacity(max_num_seqs)
+        if hasattr(balancer._strategy, "set_capacity"):
+            balancer._strategy.set_capacity(max_num_seqs)
     return balancer

@@ -32,14 +32,10 @@ import ray
 import uni_agent.llm_router as _llm_router_pkg
 from verl.workers.rollout.router import get_router_handle
 
-# Absolute path to the packaged router YAML. verl #7115 dropped ``pkg://``
-# support from ``resolve_config_path`` (cwd / verl-root only), so the test
-# hands verl a plain filesystem path.
-ROUTER_CONFIG_PATH = os.path.join(
-    os.path.dirname(_llm_router_pkg.__file__), "configs", "kvc_aware_router.yaml"
-)
+# Absolute path to the packaged router YAML.
+ROUTER_CONFIG_PATH = os.path.join(os.path.dirname(_llm_router_pkg.__file__), "configs", "agent_aware_router.yaml")
 
-pytestmark = [pytest.mark.st, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 @ray.remote
@@ -138,7 +134,7 @@ class TestKVCAwareEndToEnd:
         handle = get_router_handle(_mk("s0", "s1"), router_config_path=ROUTER_CONFIG_PATH)
         status = ray.get(handle.get_status.remote())
         assert status["provider"] == "CollectorManager"
-        assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
+        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]
         assert set(status["servers"]) == {"s0", "s1"}
         assert status["route_calls"] == 0
         ray.get(handle.acquire_server.remote("r1", [1, 2, 3]))
