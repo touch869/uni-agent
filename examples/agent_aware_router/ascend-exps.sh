@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
-# Single-node Ascend (vllm-ascend) experiment matrix driver.
+# Single-node experiment matrix driver (Ascend by default, GPU-supported).
 #
 # Sweeps sticky-vs-kvcaware over (concurrency × context), retrying each run until
 # the "inference summary" sentinel lands in its log. Requires an OpenYuanrong
 # remote sandbox (the only reverse-tunnel provider).
+#
+# Every knob is env-overridable for smaller hosts / smoke runs, e.g.:
+#   DEVICE=gpu TP=2 MODEL=/data/models/Qwen/Qwen3-8B DATASET=/data/datasets/swe_bench_verified.parquet \
+#   CONCURRENCYS="16" CONTEXTS="16384" LTS="0.6" MAX_SAMPLES=4 N=2 bash ascend-exps.sh
 
 set -uo pipefail
 
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+# ── Device backend: ascend (default) or gpu ──────────────────────────────
+DEVICE="${DEVICE:-ascend}"          # ascend | gpu (mooncake connector + NPU cleanup)
+TP="${TP:-4}"
+if [ "$DEVICE" = "ascend" ]; then
+    export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+else
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+fi
 export PYTHONHASHSEED=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-MODEL=/path/to/Qwen/Llama3.1-8B-Instruct
-DATASET=/path/to/swe_bench_train_model.parquet
-MAX_SAMPLES=64
-RES_LEN=8000
+: "${MODEL:?Set MODEL to a local model path}"
+: "${DATASET:?Set DATASET to a swe_bench parquet (uni_agent.tasks.swe_bench.preprocess)}"
+MAX_SAMPLES="${MAX_SAMPLES:-64}"
+RES_LEN="${RES_LEN:-8000}"
+N="${N:-8}"
 
 # OpenYuanrong sandbox creds (only reverse-tunnel provider).
 : "${OPENYUANRONG_SERVER_ADDRESS:?Set OPENYUANRONG_SERVER_ADDRESS}"
@@ -35,8 +47,8 @@ trap 'rl-insight server stop 2>/dev/null || true' EXIT
 
 TARGET="inference summary"
 
-concurrencys=(16 24 32 128 192 256)
-contexts=(16384 32768 64000 128000)
+concurrencys=(${CONCURRENCYS:-16 24 32 128 192 256})
+contexts=(${CONTEXTS:-16384 32768 64000 128000})
 
 run_experiment() {
     local log_file=$1
@@ -46,19 +58,23 @@ run_experiment() {
         pkill -9 -f 'run_infer.py|ray::' || true
         ps -aux | grep run_infer.sh | grep -v grep | awk -F ' ' '{print $2}' | xargs -r -I {} kill -9 {} || true
         ray stop || true
-        fuser -k /dev/davinci* || true
-        npu-smi info
+        if [ "$DEVICE" = "ascend" ]; then
+            fuser -k /dev/davinci* || true
+            npu-smi info
+        else
+            nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
+        fi
         bash "${REPO_ROOT}/examples/agent_aware_router/run_infer.sh" \
             --model-path "$MODEL" \
             --data-path "$DATASET" \
             --task-config "${REPO_ROOT}/examples/agent_aware_router/task_config_mini_swe_agent.yaml" \
-            --device ascend \
+            --device "$DEVICE" \
             --n-gpus-per-node 8 \
-            --tp 4 \
+            --tp "$TP" \
             --response-length "$RES_LEN" \
             --max-model-len "$CONTEXT" \
             --max-samples "$MAX_SAMPLES" \
-            --n 8 \
+            --n "$N" \
             --shuffle \
             --concurrency "$CONCURRENCY" \
             --kv-events \
@@ -68,15 +84,15 @@ run_experiment() {
 
 for CONCURRENCY in "${concurrencys[@]}"; do
     for CONTEXT in "${contexts[@]}"; do
-        LOG_FILE="infer-sticky-prompt${MAX_SAMPLES}x8-${CONCURRENCY}x${CONTEXT}.log"
+        LOG_FILE="infer-${DEVICE}-sticky-prompt${MAX_SAMPLES}x${N}-${CONCURRENCY}x${CONTEXT}.log"
         echo "Running sticky concurrency=${CONCURRENCY} context=${CONTEXT}"
         run_experiment "$LOG_FILE" \
             --slow-cut least-inflight \
             --overload-mode None
 
-        lts=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9)
+        lts=(${LTS:-0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9})
         for lt in "${lts[@]}"; do
-            LOG_FILE="infer-kvcaware-lt${lt}-prompt${MAX_SAMPLES}x8-${CONCURRENCY}x${CONTEXT}.log"
+            LOG_FILE="infer-${DEVICE}-kvcaware-lt${lt}-prompt${MAX_SAMPLES}x${N}-${CONCURRENCY}x${CONTEXT}.log"
             echo "Running kvcaware-lt${lt} concurrency=${CONCURRENCY} context=${CONTEXT}"
             run_experiment "$LOG_FILE" \
                 --slow-cut capacity-token-aware \
