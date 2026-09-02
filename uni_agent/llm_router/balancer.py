@@ -227,11 +227,14 @@ class KVCAwareBalancer:
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
         """Release a server after a request completes; fires ``on_release``.
 
-        Matches the verl #7115 Protocol signature exactly: the token list is
-        not re-serialized on release. The in-flight token gauge stays symmetric
-        because the inflight collector balances it from its own acquire-time
-        per-request ``prompt_len`` bookkeeping (see ``collector``), mirroring
-        how it balances the in-flight turn sum.
+        ``prompt_ids`` (the completing request's input token ids) mirror the value
+        passed at ``acquire_server`` time; ``len(prompt_ids)`` is forwarded as the
+        same ``prompt_len`` int that ``on_acquire`` produced, so the in-flight
+        token gauge is decremented by exactly what acquire added. ``request_id``
+        lets the inflight parser attribute the release to the right request (e.g.
+        to subtract its turn from the in-flight turn sum). Both default for
+        callers that do not track them (the token gauge simply stays unchanged on
+        release).
         """
         if self._inflight.get(server_id, 0) > 0:
             self._inflight[server_id] -= 1
