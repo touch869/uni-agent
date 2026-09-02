@@ -125,6 +125,8 @@ def _write_overridden_router_yaml(
     *,
     base_path: str,
     load_threshold: float | None,
+    slow_cut: str | None = None,
+    overload_mode: str | None = None,
 ) -> str:
     """Resolve the packaged router YAML, apply CLI overrides, write a temp copy.
 
@@ -163,6 +165,10 @@ def _write_overridden_router_yaml(
 
     if load_threshold is not None:
         strat0.load_threshold = load_threshold
+    if slow_cut is not None:
+        strat0.slow_cut = slow_cut
+    if overload_mode is not None:
+        strat0.overload_mode = overload_mode
 
     # Save the COMPOSED tree (defaults expanded) so verl reads the temp file
     # with plain Hydra compose or OmegaConf.load alike.
@@ -233,8 +239,10 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     vllm_kwargs: dict = {"enable_mfu_metrics": True}
     if args.enable_mooncake:
         # Cross-replica KV sharing via mooncake (config via MOONCAKE_CONFIG_PATH env).
+        # GPU build uses "MooncakeStoreConnector"; vllm-ascend uses "MooncakeConnectorStoreV1".
+        mooncake_connector = "MooncakeConnectorStoreV1" if args.device == "ascend" else "MooncakeStoreConnector"
         vllm_kwargs["kv_transfer_config"] = {
-            "kv_connector": "MooncakeStoreConnector",
+            "kv_connector": mooncake_connector,
             "kv_role": "kv_both",
             "kv_connector_extra_config": {},
         }
@@ -256,6 +264,8 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     router_yaml = _write_overridden_router_yaml(
         base_path=args.router_config_path,
         load_threshold=args.load_threshold,
+        slow_cut=args.slow_cut,
+        overload_mode=args.overload_mode,
     )
     rollout.router_config_path = router_yaml
 
@@ -555,6 +565,12 @@ def main() -> None:
         default="mooncake_config.json",
         help="Path to the mooncake config JSON (used with --enable-mooncake).",
     )
+    parser.add_argument(
+        "--device",
+        choices=["gpu", "ascend"],
+        default="gpu",
+        help="Device backend (selects the mooncake connector class).",
+    )
 
     # KVCAware router strategy[0] overrides (each falls back to the packaged YAML when omitted).
     parser.add_argument(
@@ -563,6 +579,21 @@ def main() -> None:
         default=0.9,
         help="KVCAware strategy[0] load_threshold (overload when load > threshold, (0,1)). "
         "Overrides the packaged YAML when set.",
+    )
+    parser.add_argument(
+        "--slow-cut",
+        type=str,
+        default=None,
+        help="KVCAware strategy[0] slow_cut (prefix-load-aware / least-inflight / "
+        "capacity-token-aware); overrides the packaged YAML when set. The experiment "
+        "matrices select sticky-vs-kvcaware control groups through this.",
+    )
+    parser.add_argument(
+        "--overload-mode",
+        type=str,
+        default=None,
+        help="KVCAware strategy[0] overload_mode (kv_load / kv_cache_usage_perc / None); "
+        "overrides the packaged YAML when set.",
     )
 
     args = parser.parse_args()
