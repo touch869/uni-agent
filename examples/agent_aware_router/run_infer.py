@@ -231,7 +231,13 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # vLLM engine kwargs: MFU metric (always on) + optional mooncake connector / kv-events.
     vllm_kwargs: dict = {"enable_mfu_metrics": True}
-
+    if args.enable_mooncake:
+        # Cross-replica KV sharing via mooncake (config via MOONCAKE_CONFIG_PATH env).
+        vllm_kwargs["kv_transfer_config"] = {
+            "kv_connector": "MooncakeStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {},
+        }
     if args.kv_events:
         # vLLM kv-events (zmq publisher) — kvcaware load signal (retained-cache
         # occupancy). Ports are placeholders (the uni-agent kv-events server
@@ -268,6 +274,13 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
             }
         },
     }
+    if args.simulated_runner_fqn:
+        # Swap the sandbox-backed runner for a test double (canned observations,
+        # no container): the framework treats runners as interchangeable
+        # AgentRunner-protocol callables.
+        task_runner = agent_framework_cfg["agent_runners"]["task"]
+        task_runner["runner_fqn"] = args.simulated_runner_fqn
+        task_runner["runner_kwargs"] = {}
     agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
@@ -524,6 +537,24 @@ def main() -> None:
         "Required for KVCAware router load signal and standalone collector metrics. "
         "Use --no-kv-events to disable.",
     )
+    parser.add_argument(
+        "--simulated-runner-fqn",
+        type=str,
+        default=None,
+        help="Swap the sandbox-backed task runner for a test double (canned tool "
+        "observations, no container); the e2e tests drive the loop through this.",
+    )
+    parser.add_argument(
+        "--enable-mooncake",
+        action="store_true",
+        help="Attach MooncakeStoreConnector for cross-replica KV sharing.",
+    )
+    parser.add_argument(
+        "--mooncake-config-path",
+        type=str,
+        default="mooncake_config.json",
+        help="Path to the mooncake config JSON (used with --enable-mooncake).",
+    )
 
     # KVCAware router strategy[0] overrides (each falls back to the packaged YAML when omitted).
     parser.add_argument(
@@ -535,6 +566,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.enable_mooncake and args.mooncake_config_path:
+        os.environ["MOONCAKE_CONFIG_PATH"] = os.path.expanduser(args.mooncake_config_path)
 
     if not ray.is_initialized():
         if os.environ.get("RAY_ADDRESS"):

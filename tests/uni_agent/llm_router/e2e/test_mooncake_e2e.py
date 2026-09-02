@@ -39,11 +39,11 @@ pytestmark = [pytest.mark.e2e, pytest.mark.gpu]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", "..", ".."))
-_RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "run_infer.sh")
+_RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "agent_aware_router", "run_infer.sh")
 _SIMULATED_RUNNER_FQN = "tests.uni_agent.llm_router.e2e.utils.simulated_sandbox.simulated_runner"
 _MODEL = os.environ.get("VLLM_MODEL", "/data1/models/Qwen/Qwen3-4B-Instruct-2507")
 _DATASET = os.environ.get("SWEBENCH_DATASET", "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
-_TASK_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "task_config_mini_swe_agent.yaml")
+_TASK_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "agent_aware_router", "task_config_mini_swe_agent.yaml")
 _LOG_DIR = "/tmp/e2e_mooncake_logs"
 
 # Mooncake daemon ports — the test brings up its own metadata server + master
