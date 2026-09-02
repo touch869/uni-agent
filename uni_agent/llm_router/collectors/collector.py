@@ -60,6 +60,12 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
     MetricKey.ESTIMATED_FLOPS_PER_GPU,
 )
 
+# Per-request bookkeeping key: prompt length recorded at dispatch. verl #7115
+# releases carry no token list, so the release-side ``INFLIGHT_TOKENS`` delta
+# is folded from this row — same acquire-record / release-consume shape as the
+# per-request "turn" counter below.
+_PROMPT_LEN_KEY = "prompt_len"
+
 
 def _avg(delta_sum: float, delta_cnt: float) -> float:
     """Windowed average = delta_sum / delta_cnt, or NaN if no samples."""
@@ -193,9 +199,13 @@ class Collector:
         """Write MetricsUpdate via DataStore, then forward to the insight emitter.
 
         Delta updates (acquire/release) route to ``incr_metrics``; the in-flight
-        turn sum (``INFLIGHT_TURN_SUM``) is folded into the same locked write —
-        acquire adds the request's current turn, release subtracts it (release
-        does not change turn, so it subtracts the same value acquire added).
+        turn sum (``INFLIGHT_TURN_SUM``) and the release-side token delta
+        (``INFLIGHT_TOKENS``) are folded into the same locked write from
+        per-request rows recorded at dispatch — acquire records the request's
+        current turn and prompt length, release subtracts both (release changes
+        neither, so it subtracts what acquire recorded). verl #7115 releases
+        carry no token list, which is why the length lives in a per-request row
+        rather than the release event.
         Both acquire and release refresh the throttled ``router-dispatch``
         snapshot. Absolute (non-delta) updates are polled gauges, handled
         below. When rl-insight emit is on, each write also builds a
@@ -204,9 +214,9 @@ class Collector:
         """
         if update.is_delta:
             # Batch the decoder's signed deltas in one locked PerReplica write.
-            # Turn lives in PerRequestStore (separate lock); look it up first so
-            # it joins this batch (no second PerReplica lock cycle). Turn fires
-            # only on dispatch/release.
+            # Turn / prompt_len live in PerRequestStore (separate lock); look
+            # them up first so they join this batch (no second PerReplica lock
+            # cycle). They fire only on dispatch/release.
             deltas = dict(update.metrics)
             is_acquire = MetricKey.DISPATCHED_COUNT in deltas
             is_release = MetricKey.COMPLETED_COUNT in deltas
@@ -215,12 +225,20 @@ class Collector:
                     logger.debug("dispatch (DISPATCHED_COUNT) update missing request_id — skipping turn")
                 else:
                     deltas[MetricKey.INFLIGHT_TURN_SUM] = self._data_store.incr_per_request(update.request_id, "turn")
+                    self._data_store.set_per_request(
+                        update.request_id, _PROMPT_LEN_KEY, deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
+                    )
             elif is_release:
                 if update.request_id is None:
-                    logger.debug("release (COMPLETED_COUNT) update missing request_id — skipping turn subtraction")
+                    logger.debug(
+                        "release (COMPLETED_COUNT) update missing request_id — skipping turn/token subtraction"
+                    )
                 else:
                     deltas[MetricKey.INFLIGHT_TURN_SUM] = -self._data_store.get_per_request(
                         update.request_id, "turn", 0
+                    )
+                    deltas[MetricKey.INFLIGHT_TOKENS] = -self._data_store.get_per_request(
+                        update.request_id, _PROMPT_LEN_KEY, 0
                     )
             new_values = self._data_store.incr_metrics(update.node_id, deltas)
             if emitter.enabled() and (is_acquire or is_release):

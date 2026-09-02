@@ -91,14 +91,13 @@ class TestInflightDecoder:
         assert upd.request_id == "r1"  # carried so the collector attributes the dispatch's turn
 
     def test_on_release_emits_inflight_minus_completed_delta(self):
-        upd = InflightDecoder().decode(
-            StatisticEvent("on_release", replica_id="s0", prompt_len=42, request_id="r1"), ""
-        )
+        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0", request_id="r1"), "")
         assert isinstance(upd, MetricsUpdate)
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: -1,
-            MetricKey.INFLIGHT_TOKENS: -42,  # gauge -prompt_len, mirrors the acquire
             MetricKey.COMPLETED_COUNT: 1,
+            # no INFLIGHT_TOKENS here — verl #7115 releases carry no length; the
+            # collector folds the negative token delta from acquire-time bookkeeping
         }
         assert upd.is_delta is True
         assert upd.request_id == "r1"  # carried so the collector can attribute the release
@@ -147,12 +146,12 @@ class TestCallbackTransport:
         assert all(len(lst) == 1 for lst in balancer.callbacks.values())
 
         balancer.callbacks["on_acquire"][0]("r1", "s0")
-        balancer.callbacks["on_release"][0]("s0", 7)  # release forwards prompt_len
+        balancer.callbacks["on_release"][0]("s0")
         balancer.callbacks["on_servers_removed"][0](["s1", "s2"])
 
         assert received == [
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0"),
-            StatisticEvent("on_release", replica_id="s0", prompt_len=7),
+            StatisticEvent("on_release", replica_id="s0"),
             StatisticEvent("on_servers_removed", server_ids=("s1", "s2")),
         ]
 
@@ -162,11 +161,11 @@ class TestCallbackTransport:
         received: list = []
         _run(transport.subscribe(lambda raw, nid: received.append(raw)))
 
-        # (server_id, prompt_len, request_id) — the 3rd arg threads the routing
-        # request id so the collector can attribute the release (e.g. turn subtraction).
-        balancer.callbacks["on_release"][0]("s0", 7, "r1")
+        # (server_id, request_id) — the 2nd arg threads the routing request id
+        # so the collector can attribute the release (turn / token subtraction).
+        balancer.callbacks["on_release"][0]("s0", "r1")
         assert received == [
-            StatisticEvent("on_release", replica_id="s0", prompt_len=7, request_id="r1"),
+            StatisticEvent("on_release", replica_id="s0", request_id="r1"),
         ]
 
     def test_stop_unregisters_all(self):
@@ -217,7 +216,8 @@ class TestCollectorCallbackIntegration:
     def test_inflight_collector_applies_acquire_release_delta_and_prompt_len(self):
         """Feature: InflightDecoder on_acquire/on_release drive inflight/token/dispatched/completed
           deltas and accumulate PROMPT_LEN_SUM from the prompt_ids length.
-        Description: two acquires (r1 len-3, r2 len-10) to s0, one release (-3 tokens), and an
+        Description: two acquires (r1 len-3, r2 len-10) to s0, one release of r1 (-3 tokens, folded
+          from acquire-time bookkeeping — releases carry no length under verl #7115), and an
           acquire to s1 with no prompt — exercising both the delta metrics and prompt-len sum.
         Expectation:
           s0 INFLIGHT_COUNT=1, INFLIGHT_TOKENS=10 (3+10-3), DISPATCHED_COUNT=2, COMPLETED_COUNT=1
@@ -232,7 +232,7 @@ class TestCollectorCallbackIntegration:
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # +1 inflight, +3 tokens, len 3
             balancer.callbacks["on_acquire"][0]("r2", "s0", list(range(10)))  # +1 inflight, +10 tokens, len 10
-            balancer.callbacks["on_release"][0]("s0", 3)  # -1 inflight, -3 tokens, +1 completed
+            balancer.callbacks["on_release"][0]("s0", "r1")  # -1 inflight, -3 tokens (bookkeeping), +1 completed
             balancer.callbacks["on_acquire"][0]("r3", "s1", None)  # no prompt → PROMPT_LEN_SUM 0
             ds = DataStore()
             # acquire/release delta metrics on s0
@@ -376,7 +376,7 @@ class TestCollectorEmitsToInsight:
         collector.start()
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # plen 3, turn 1
-            balancer.callbacks["on_release"][0]("s0", 3, "r1")  # release r1 (turn subtracted)
+            balancer.callbacks["on_release"][0]("s0", "r1")  # release r1 (turn + tokens subtracted)
         finally:
             collector.stop()
 

@@ -24,12 +24,20 @@ Per detailed_balancer.md §5.3B.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import ray
 
+import uni_agent.llm_router as _llm_router_pkg
 from verl.workers.rollout.router import get_router_handle
 
-ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
+# Absolute path to the packaged router YAML. verl #7115 dropped ``pkg://``
+# support from ``resolve_config_path`` (cwd / verl-root only), so the test
+# hands verl a plain filesystem path.
+ROUTER_CONFIG_PATH = os.path.join(
+    os.path.dirname(_llm_router_pkg.__file__), "configs", "kvc_aware_router.yaml"
+)
 
 pytestmark = [pytest.mark.st, pytest.mark.cpu, pytest.mark.level0]
 

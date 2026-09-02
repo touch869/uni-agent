@@ -37,16 +37,17 @@ forwarded as a ``PROMPT_LEN_SUM`` delta — the per-replica cumulative
 request-size signal the plot derives an average dispatched prompt length from.
 
 ``INFLIGHT_TOKENS`` is the token-weighted sibling of the inflight gauge: acquire
-adds the request's ``prompt_len`` and release subtracts it. acquire/release run
-in the same ``generate()`` scope and see the same ``prompt_ids``, so the balancer
-forwards the identical ``prompt_len`` on both — the gauge is symmetric and needs
-no request→len bookkeeping in the store.
+adds the request's ``prompt_len``. Releases carry no length (verl #7115
+serializes only ``request_id`` on release), so the collector folds the negative
+``INFLIGHT_TOKENS`` delta from its acquire-time per-request ``prompt_len`` row —
+the same acquire-record / release-consume shape as the turn handling below.
 
 Event → delta mapping:
 - ``on_acquire`` → ``INFLIGHT_COUNT``/``DISPATCHED_COUNT`` +1,
   ``INFLIGHT_TOKENS``/``PROMPT_LEN_SUM`` +``prompt_len``, carrying ``request_id``.
-- ``on_release`` → ``INFLIGHT_COUNT`` -1, ``INFLIGHT_TOKENS`` -``prompt_len``,
-  ``COMPLETED_COUNT`` +1, carrying ``request_id``.
+- ``on_release`` → ``INFLIGHT_COUNT`` -1, ``COMPLETED_COUNT`` +1, carrying
+  ``request_id`` (the ``INFLIGHT_TOKENS`` subtraction is folded by the
+  collector from acquire-time bookkeeping, not this event).
 
 ``on_servers_removed`` is intentionally a no-op (returns ``None``): verl never
 removes servers and maintains ``_inflight_requests`` purely via symmetric
@@ -95,7 +96,6 @@ class InflightDecoder(Decoder):
                 node_id=event.replica_id,
                 metrics={
                     MetricKey.INFLIGHT_COUNT: -1,
-                    MetricKey.INFLIGHT_TOKENS: -event.prompt_len,
                     MetricKey.COMPLETED_COUNT: 1,
                 },
                 is_delta=True,

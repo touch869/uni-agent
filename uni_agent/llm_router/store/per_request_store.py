@@ -92,13 +92,39 @@ class PerRequestStore:
             if not row:
                 del self._data[request_id]
 
-    def delete_where(self, key: str, value: Any) -> None:
-        """Drop ``key`` from every request whose value for it equals ``value``."""
+    def _drop_from_rows(self, key: str, rows: list[tuple[str, dict[str, Any]]]) -> int:
+        """Pop ``key`` from each given row and prune emptied rows.
+
+        Caller holds ``_lock`` and picked the rows. Returns how many rows were
+        touched — the pop-and-prune invariant lives only here.
+        """
+        touched = 0
+        for request_id, row in rows:
+            row.pop(key, None)
+            touched += 1
+            if not row:
+                del self._data[request_id]
+        return touched
+
+    def delete_where(self, key: str, value: Any) -> int:
+        """Drop ``key`` from every request whose value for it equals ``value``.
+
+        Returns:
+            Number of request rows the key was dropped from (0 if none).
+        """
         with self._lock:
-            for request_id, row in [(rid, r) for rid, r in self._data.items() if r.get(key) == value]:
-                row.pop(key, None)
-                if not row:
-                    del self._data[request_id]
+            picked = [(rid, r) for rid, r in self._data.items() if r.get(key) == value]
+            return self._drop_from_rows(key, picked)
+
+    def delete_key(self, key: str) -> int:
+        """Drop ``key`` from every request that has it, regardless of value.
+
+        Returns:
+            Number of request rows the key was dropped from (0 if none).
+        """
+        with self._lock:
+            picked = [(rid, r) for rid, r in self._data.items() if key in r]
+            return self._drop_from_rows(key, picked)
 
     def count(self, key: str) -> int:
         """Number of requests that currently have ``key`` set."""

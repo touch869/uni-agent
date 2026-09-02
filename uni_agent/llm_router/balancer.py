@@ -49,9 +49,21 @@ class KVCAwareBalancer:
     # Emit a route() latency aggregate every N route() calls to bound log volume.
     _ROUTE_LOG_EVERY = 64
 
-    def __init__(self, servers: dict[str, Any], config: Optional[dict] = None) -> None:
+    def __init__(
+        self,
+        servers: dict[str, Any],
+        config: Optional[dict] = None,
+        provider_factory: Callable[..., Any] = None,
+    ) -> None:
         if not servers:
             raise ValueError("servers must be non-empty")
+        # Provider construction seam: verl instantiates this class with
+        # ``(servers, yaml_config)`` only, so the default is the real manager;
+        # unit tests inject a fake through this kwarg instead of monkey-patching
+        # class attributes (which ray.remote's by-value serialization leaks).
+        if provider_factory is None:
+            provider_factory = CollectorManager
+        self._provider_factory = provider_factory
         self._config = KVCAwareConfig.from_config(config)
         logger.info(f"KVCAwareBalancer, config={self._config}")
         self._strategies: list[tuple[Any, float]] = [
@@ -59,6 +71,11 @@ class KVCAwareBalancer:
         ]
         self._strategy_summary = self._build_strategy_summary(self._config.strategies)
         self._servers: dict[str, Any] = dict(servers)
+        # Balancer-side in-flight counters (server_id → count), mirroring verl's
+        # ``GlobalRequestLoadBalancer._inflight_requests`` — answers the #7115
+        # protocol's ``get_total_inflight()`` RPC without depending on collector
+        # configuration (the store's INFLIGHT_COUNT is the collector-fed twin).
+        self._inflight: dict[str, int] = {sid: 0 for sid in self._servers}
         max_num_seqs = self._resolve_max_num_seqs()
         max_num_batched_tokens = self._resolve_max_num_batched_tokens()
         for strategy, _ in self._strategies:
@@ -162,7 +179,7 @@ class KVCAwareBalancer:
                 if len(endpoints) == 2:
                     endpoints = [*endpoints, "zmq", "kv-events"]
                 kv_event_endpoints[replica_id] = endpoints
-        self._provider = CollectorManager(
+        self._provider = self._provider_factory(
             self._config.collector,
             collection_names,
             server_addresses=server_addresses,
@@ -206,24 +223,21 @@ class KVCAwareBalancer:
             "strategies": [{"type": type(s).__name__, "weight": w} for s, w in self._strategies],
             "route_calls": self._route_calls,
             "sticky_size": self._store.sticky_status()["size"],
+            "total_inflight": self.get_total_inflight(),
         }
 
-    def release_server(
-        self, server_id: str, prompt_ids: list[int] | None = None, request_id: str | None = None
-    ) -> None:
+    def release_server(self, server_id: str, request_id: str | None = None) -> None:
         """Release a server after a request completes; fires ``on_release``.
 
-        ``prompt_ids`` (the completing request's input token ids) mirror the value
-        passed at ``acquire_server`` time; ``len(prompt_ids)`` is forwarded as the
-        same ``prompt_len`` int that ``on_acquire`` produced, so the in-flight
-        token gauge is decremented by exactly what acquire added. ``request_id``
-        lets the inflight decoder attribute the release to the right request (e.g.
-        to subtract its turn from the in-flight turn sum). Both default for
-        callers that do not track them (the token gauge simply stays unchanged on
-        release).
+        Matches the verl #7115 Protocol signature exactly: the token list is
+        not re-serialized on release. The in-flight token gauge stays symmetric
+        because the inflight collector balances it from its own acquire-time
+        per-request ``prompt_len`` bookkeeping (see ``collector``), mirroring
+        how it balances the in-flight turn sum.
         """
-        prompt_len = len(prompt_ids) if prompt_ids else 0
-        self._fire("on_release", server_id, prompt_len, request_id)
+        if self._inflight.get(server_id, 0) > 0:
+            self._inflight[server_id] -= 1
+        self._fire("on_release", server_id, request_id)
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Delegate to ``route()`` for a best-first ranking, return ``(top, handle)``.
@@ -248,6 +262,7 @@ class KVCAwareBalancer:
         if not ranking:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
+        self._inflight[server_id] = self._inflight.get(server_id, 0) + 1
         self._fire("on_acquire", request_id, server_id, prompt_ids)
         logger.info(
             f"request={request_id} routed to server={server_id} (ranking={ranking}, pool={list(self._servers)}, "
@@ -262,14 +277,56 @@ class KVCAwareBalancer:
             )
         return server_id, self._servers[server_id]
 
+    # ── verl #7115 protocol: field declaration + trainer-facing controls ──
+
+    def require_acquire_fields(self) -> list[str]:
+        """``generate()`` kwargs this router consumes at acquire time.
+
+        verl's ``LLMServerClient`` serializes only the declared fields into the
+        ``acquire_server`` RPC; prefix-hash routing needs the prompt tokens.
+        """
+        return ["prompt_ids"]
+
+    def require_release_fields(self) -> list[str]:
+        """Identity fields this router consumes at release time.
+
+        Only ``"request_id"`` is supported by verl today; the prompt length is
+        recovered from acquire-time bookkeeping (see ``release_server``).
+        """
+        return ["request_id"]
+
+    def clear_sticky_cache(self) -> dict:
+        """Drop every sticky binding so returning sessions re-route (verl #7115).
+
+        Called by trainers on training/rollout phase switches and by fully-async
+        rebalancing. Prefix-hash checkpoints are deliberately kept — they are
+        replica-agnostic (shared across replicas, append-only), so re-routed
+        requests still reuse them.
+
+        Returns:
+            ``{"cleared_entries": int, "server_loads": dict[str, int]}``.
+        """
+        cleared = self._store.clear_sticky_bindings()
+        loads = dict(self._inflight)
+        logger.info(f"clear_sticky_cache: cleared {cleared} binding(s); server_loads={loads}")
+        return {"cleared_entries": cleared, "server_loads": loads}
+
+    def get_total_inflight(self) -> int:
+        """Total in-flight requests across the pool (verl #7115 drain polling)."""
+        return sum(self._inflight.values())
+
     def add_servers(self, servers: dict[str, Any]) -> None:
         """Bulk-add servers to the pool (provider is keyed by init-time addresses, untouched here)."""
         for sid, handle in servers.items():
             self._servers[sid] = handle
+            self._inflight.setdefault(sid, 0)
 
     def remove_servers(self, server_ids: list[str]) -> None:
         """Bulk-remove servers; fires ``on_servers_removed`` to invalidate sticky bindings."""
         for sid in server_ids:
             self._servers.pop(sid, None)
+            # Mirror verl's built-in: drop the counter row; a later release for
+            # an in-flight request is tolerated by release_server's floor guard.
+            self._inflight.pop(sid, None)
         if server_ids:
             self._fire("on_servers_removed", server_ids)

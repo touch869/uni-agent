@@ -248,6 +248,17 @@ class DataStore:
         """Drop every sticky binding pointing at a removed replica."""
         self._per_request.delete_where(_STICKY_KEY, replica_id)
 
+    def clear_sticky_bindings(self) -> int:
+        """Drop every sticky binding regardless of target replica.
+
+        Backs the #7115 protocol's ``clear_sticky_cache`` (trainer phase
+        switches / fully-async rebalancing).
+
+        Returns:
+            Number of request rows a binding was dropped from.
+        """
+        return self._per_request.delete_key(_STICKY_KEY)
+
     def sticky_status(self) -> dict:
         """Return a debugging snapshot of the sticky bindings."""
         return {"max_size": self._per_request.max_size, "size": self._per_request.count(_STICKY_KEY)}

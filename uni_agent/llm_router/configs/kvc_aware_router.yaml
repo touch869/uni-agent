@@ -1,11 +1,14 @@
 # KV-cache-aware router — external plugin config (FQN injection).
 #
-# Loaded by verl through its ``router_config_path``:
-#   rollout.router_config_path: pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml
+# Loaded by verl through its ``router_config_path``. verl #7115 dropped
+# ``pkg://`` support from its config-path resolution (plain filesystem paths
+# only), so hand verl an absolute path to this file, e.g.:
+#   rollout.router_config_path: /abs/path/uni_agent/llm_router/configs/kvc_aware_router.yaml
+# (examples/agent_aware_router/run_infer.py keeps a pkg:// default of its own
+# but resolves it driver-side and hands verl a temp copy.)
 # The top-level ``router_class`` FQN is imported and instantiated with this
-# YAML's full content as ``config``. Mirrors the shape of verl router-dev's
-# rollout/router/kvcaware.yaml (single merged file, no Hydra defaults split),
-# with the FQN anchor + _target_ FQN retargeted to the uni_agent package.
+# YAML's full content as ``config``. Single merged file — no Hydra ``defaults``
+# block (verl #7115 rejects one).
 
 router_class: uni_agent.llm_router.balancer.KVCAwareBalancer
 

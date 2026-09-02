@@ -40,7 +40,7 @@ class StatisticEvent:
     in arity, so they cannot be forced into ``(raw, node_id)``:
 
     - ``on_acquire(request_id, chosen, prompt_ids)``  → two strings + a token list
-    - ``on_release(server_id, prompt_len, request_id)`` → string + int + optional id
+    - ``on_release(server_id, request_id)``           → string + optional id
     - ``on_servers_removed(ids)``                     → list[str], not bytes/str
 
     Attributes:
@@ -52,11 +52,10 @@ class StatisticEvent:
             both as "the replica this event is about".
         server_ids: Removed server ids (``on_servers_removed``).
         prompt_len: Input prompt length (``len(prompt_ids)``; 0 when no prompt
-            was forwarded). Set on ``on_acquire`` and, symmetrically, on
-            ``on_release`` — acquire/release share the request's ``prompt_ids``
-            in one ``generate()`` scope, so the same value flows to both and the
-            inflight-token gauge (+prompt_len on acquire, -prompt_len on release)
-            stays balanced without any request→len bookkeeping.
+            was forwarded). Set on ``on_acquire`` only — verl #7115 releases
+            carry no token list, so the release-side token-gauge subtraction is
+            folded by the collector from acquire-time per-request bookkeeping,
+            not from this event.
     """
 
     event: str
@@ -103,12 +102,11 @@ class CallbackTransport(Transport):
                 "",
             )
 
-        def _on_release(server_id: str, prompt_len: int = 0, request_id: str | None = None) -> None:
+        def _on_release(server_id: str, request_id: str | None = None) -> None:
             handler(
                 StatisticEvent(
                     "on_release",
                     replica_id=server_id,
-                    prompt_len=prompt_len,
                     request_id=request_id,
                 ),
                 "",

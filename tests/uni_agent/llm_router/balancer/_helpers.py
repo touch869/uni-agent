@@ -15,10 +15,9 @@
 """Helpers for balancer unit tests.
 
 Defines ``_FakeCollectorManager`` (real statistic collectors + stubbed network
-collectors) and helper functions. Patching is done by ``conftest.py`` via a
-session-scoped autouse fixture (``_conditional_patch``) that only fires when
-balancer ut tests are selected, so it never leaks to Ray workers in other test
-directories.
+collectors), injected into the Balancer via its ``provider_factory`` seam —
+no class-attribute monkey-patching (ray.remote serializes the class by value,
+so a patched class leaks into Ray actors sharing the session).
 """
 
 from __future__ import annotations
@@ -85,28 +84,13 @@ def _router_config(weight: float = 1.0):
     )
 
 
-def _fake_init_provider(self):
-    """Replacement for KVCAwareBalancer._init_provider in unit tests.
-
-    Injects a ``_FakeCollectorManager`` that builds REAL statistic collectors
-    (sticky_stat/inflight_stat → the real Balancer-callback chain) while
-    stubbing network collectors. The real ``DataStore`` is KEPT (not swapped
-    for a stub) so the real statistic collectors
-    (``Collector._data_store = DataStore()``) and strategy reads share the SAME
-    singleton-backed store — that's what makes the sticky path actually work.
-    Tests inject metrics via ``balancer._store.refresh_metrics(...)``.
-    """
-    collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
-    self._provider = _FakeCollectorManager(
-        self._config.collector,
-        collection_names,
-        balancer_handler=self,
-    )
-    self._provider.start()
-
-
 def _make_balancer(servers=None, max_num_seqs=None):
     """Build a balancer over the given servers (default two).
+
+    ``_FakeCollectorManager`` is injected through the Balancer's
+    ``provider_factory`` seam — real statistic collectors run (the
+    Balancer-callback chain), network collectors are stubbed, and the real
+    singleton-backed ``DataStore`` is shared with strategy reads.
 
     ``max_num_seqs`` overrides the capacity the Balancer resolved at construction
     (tests pass plain-string servers with no ``get_rollout_config``, so the
@@ -117,7 +101,7 @@ def _make_balancer(servers=None, max_num_seqs=None):
 
     if servers is None:
         servers = {"s0": "h0", "s1": "h1"}
-    balancer = KVCAwareBalancer(servers, _router_config())
+    balancer = KVCAwareBalancer(servers, _router_config(), provider_factory=_FakeCollectorManager)
     if max_num_seqs is not None:
         for strategy, _ in balancer._strategies:
             if hasattr(strategy, "set_capacity"):

@@ -21,6 +21,7 @@ from uni_agent.llm_router.balancer import KVCAwareBalancer
 from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy
 
 from ._helpers import (
+    _FakeCollectorManager,
     _make_balancer,
     _router_config,
 )
@@ -39,10 +40,11 @@ class TestKVCAwareBalancerConstruction:
     def test_b01_normal_construction_wires_components(self):
         """
         Feature: construction wires config/provider/strategies/servers
-        Description: KVCAwareBalancer({"s0": h0}, router_config)
+        Description: KVCAwareBalancer({"s0": h0}, router_config) with the fake
+          provider injected through the provider_factory seam
         Expectation: _provider built and started; _strategies wired with weight
         """
-        balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
+        balancer = KVCAwareBalancer({"s0": "h0"}, _router_config(), provider_factory=_FakeCollectorManager)
         assert balancer._provider.started is True
         assert balancer._provider.collection_names == ["inflight_stat", "sticky_stat", "vllm_zmq"]
         assert len(balancer._strategies) == 1
