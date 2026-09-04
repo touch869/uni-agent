@@ -429,11 +429,10 @@ def get_collector(
         from .parse.vllm.metrics import VLLMMetricsParser
         from .transport.http import HTTPTransport
 
-        hp = collectors_config.http_polling
         transport = HTTPTransport(
             endpoints=server_addresses or {},
-            interval=hp["polling_interval"],
-            http_timeout=hp["http_timeout"],
+            interval=collectors_config.http_interval,
+            http_timeout=collectors_config.http_timeout,
         )
         return Collector(transport, VLLMMetricsParser())
 
@@ -441,13 +440,12 @@ def get_collector(
         from .parse.vllm.kv import VLLMKVParser
         from .transport.zmq import ZMQTransport
 
-        lc = collectors_config.long_connection
         transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
-            base_retry_delay=lc["base_retry_delay"],
-            max_retry_delay=lc["max_retry_delay"],
-            max_retry_attempts=lc["max_retry_attempts"],
-            retry_backoff_factor=lc["retry_backoff_factor"],
+            base_retry_delay=collectors_config.base_retry_delay,
+            max_retry_delay=collectors_config.max_retry_delay,
+            max_retry_attempts=collectors_config.max_retry_attempts,
+            retry_backoff_factor=collectors_config.retry_backoff_factor,
         )
         return Collector(transport, VLLMKVParser())
 

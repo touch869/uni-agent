@@ -64,9 +64,9 @@ class TestKVCAwareBalancerConstruction:
         with pytest.raises(ValueError):
             KVCAwareBalancer({}, _router_config())
 
-    def test_missing_strategies_raises_config_error(self):
+    def test_missing_strategy_raises_config_error(self):
         """
-        Feature: a config missing strategies is rejected (delegated to from_config)
+        Feature: a config missing strategy is rejected (delegated to from_config)
         Description: KVCAwareBalancer with an empty router_config
         Expectation: raises ConfigError
         """
@@ -103,7 +103,7 @@ class TestTrivialMethods:
         # provider is the injected _FakeCollectorManager in unit tests; real env reports
         # "CollectorManager". Assert it matches the constructed provider's type.
         assert status["provider"] == type(balancer._provider).__name__
-        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]
+        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]  # legacy key; single strategy
         assert set(status["servers"]) == {"s0", "s1"}
         assert status["route_calls"] == 0
 

@@ -39,8 +39,36 @@ from .strategies import (
     StrategyRegistry,
     route,
 )
+from .types import Layer, OverloadMode, SlowCut
 
 logger = get_router_logger("balancer")
+
+# Collector tuning knobs beyond CollectorConfig's persisted ``http_interval``
+# field. CollectorConfig only serializes the user-tunable knob; the balancer
+# attaches the rest as attributes (with these defaults) before handing the
+# config to the collectors, so ``get_collector`` can keep reading them off the
+# config object uniformly (``collectors_config.xxx``).
+_DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
+    "http_timeout": 10.0,
+    "base_retry_delay": 1.0,
+    "max_retry_delay": 30.0,
+    "max_retry_attempts": 5,
+    "retry_backoff_factor": 2.0,
+}
+
+# Strategy tuning knobs beyond KVCAwareStrategyConfig's persisted
+# ``load_threshold`` field. The config only serializes the user-tunable knob;
+# the balancer attaches the rest as attributes (with these defaults) before
+# building the runtime strategy from it, so ``KVCacheAwareStrategy.from_config``
+# can keep reading them off the config object uniformly (``cfg.xxx``).
+_DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
+    "alpha": 0.7,
+    "layer_weights": {Layer.GPU: 0.7, Layer.CPU: 0.2, Layer.SSD: 0.1},
+    "memory_overload_filter": True,
+    "do_shortcut": True,
+    "slow_cut": SlowCut.CAPACITY_TOKEN_AWARE,
+    "overload_mode": OverloadMode.KV_CACHE_USAGE_PERC,
+}
 
 
 class KVCAwareBalancer:
@@ -64,11 +92,14 @@ class KVCAwareBalancer:
         if provider_factory is None:
             provider_factory = CollectorManager
         self._provider_factory = provider_factory
-        self._config = KVCAwareConfig.from_config(config)
+
+        self._config = self._init_config(config)
         logger.info(f"KVCAwareBalancer, config={self._config}")
-        primary_cfg = self._config.strategies[0]
+
+        primary_cfg = self._config.strategy
         self._strategy = StrategyRegistry.get(type(primary_cfg)).from_config(primary_cfg)
-        self._strategy_summary = self._build_strategy_summary(self._config.strategies)
+        self._strategy_summary = self._build_strategy_summary(self._config.strategy)
+
         self._servers: dict[str, Any] = dict(servers)
         # Balancer-side in-flight counters (server_id → count), mirroring verl's
         # ``GlobalRequestLoadBalancer._inflight_requests`` — answers the #7115
@@ -80,6 +111,7 @@ class KVCAwareBalancer:
         if hasattr(self._strategy, "set_capacity"):
             self._strategy.set_capacity(max_num_seqs, max_num_batched_tokens)
         logger.info(f"KVCAwareBalancer: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}")
+
         self._route_calls = 0
         # route() latency profiling — cumulative stats flushed every _ROUTE_LOG_EVERY calls.
         # The flush trigger derives from _route_calls % _ROUTE_LOG_EVERY (a separate
@@ -95,13 +127,12 @@ class KVCAwareBalancer:
         self._init_provider()
 
     @staticmethod
-    def _build_strategy_summary(strategies: list[Any]) -> str:
-        """One-line summary of the first (primary) strategy's key params.
+    def _build_strategy_summary(cfg: Any) -> str:
+        """One-line summary of the strategy's key params.
 
         Only the KVCacheAware tuning knobs that affect routing decisions are
         surfaced: alpha / load_threshold / memory_overload_filter / slow_cut.
         """
-        cfg = strategies[0]
         name = type(cfg).__name__
         bits = []
         for k in ("alpha", "load_threshold", "memory_overload_filter"):
@@ -141,6 +172,21 @@ class KVCAwareBalancer:
     def _resolve_max_num_batched_tokens(self, default: int = 2048) -> int:
         """Per-step token budget — denominator for the in-flight token load."""
         return self._resolve_rollout_config_int("max_num_batched_tokens", default)
+
+    def _init_config(self, config) -> KVCAwareConfig:
+        """Attach default tuning knobs to both config sections, in place."""
+        _config = KVCAwareConfig.from_config(config)
+        self._resolve_config_defaults(_config.strategy, _DEFAULT_STRATEGY_KNOBS)
+        self._resolve_config_defaults(_config.collector, _DEFAULT_COLLECTOR_KNOBS)
+        return _config
+
+    @staticmethod
+    def _resolve_config_defaults(cfg: Any, defaults: dict[str, Any]) -> Any:
+        """Attach default tuning knobs to one config object in place."""
+        for name, value in defaults.items():
+            if not hasattr(cfg, name):
+                setattr(cfg, name, value)
+        return cfg
 
     def _init_provider(self) -> None:
         """Resolve per-server endpoints from Ray actor handles, then start collectors.
@@ -218,7 +264,7 @@ class KVCAwareBalancer:
         return {
             "servers": list(self._servers.keys()),
             "provider": type(self._provider).__name__,
-            "strategies": [{"type": type(self._strategy).__name__}],
+            "strategies": [{"type": type(self._strategy).__name__}],  # legacy key; single strategy
             "route_calls": self._route_calls,
             "sticky_size": self._store.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),

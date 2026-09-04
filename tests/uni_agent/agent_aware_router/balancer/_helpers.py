@@ -73,11 +73,9 @@ def _router_config():
     """Build a minimal router_config (OmegaConf) the Balancer accepts."""
     return OmegaConf.create(
         {
-            "strategies": [
-                {
-                    "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
-                },
-            ],
+            "strategy": {
+                "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
+            },
         }
     )
 

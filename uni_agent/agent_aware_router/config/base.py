@@ -61,12 +61,10 @@ def _multiline_repr(obj: Any, indent: int = 0) -> str:
     deeper indentation.  Produces a readable tree, e.g.::
 
         KVCAwareConfig(
-          strategies=[
-            KVCAwareStrategyConfig(
-              weight=1.0,
-              ...
-            ),
-          ],
+          strategy=KVCAwareStrategyConfig(
+            load_threshold=0.9,
+            ...
+          ),
           ...
         )
     """

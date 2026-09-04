@@ -148,12 +148,8 @@ def _write_overridden_router_yaml(
     with _init_dir(config_dir=config_dir, version_base=None):
         router_cfg = _compose(config_name=config_name)
 
-    # Composed strategies: dict (defaults composition) or list (single-file YAML).
-    strategies = router_cfg.get("strategies")
-    if hasattr(strategies, "keys"):
-        strat0 = next(iter(strategies.values()))
-    else:
-        strat0 = strategies[0]
+    # Composed strategy node (polymorphic, carries _target_).
+    strat0 = router_cfg.get("strategy")
 
     if load_threshold is not None:
         strat0.load_threshold = load_threshold
