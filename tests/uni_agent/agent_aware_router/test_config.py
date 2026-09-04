@@ -276,6 +276,54 @@ def test_compact_repr():
 
 
 # ============================================================
+# KVCAwareConfig.apply_override
+# ============================================================
+
+
+def _default_config() -> KVCAwareConfig:
+    """Build a KVCAwareConfig from only a strategy node (defaults elsewhere)."""
+    return KVCAwareConfig.from_config(
+        OmegaConf.create(
+            {
+                "strategy": {
+                    "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
+                },
+            }
+        )
+    )
+
+
+def test_apply_override_updates_both_sections():
+    """
+    Feature: a flat override dict lands on the matching declared fields of both sections
+    Description: apply_override({"load_threshold": 0.6, "http_interval": 7})
+    Expectation: strategy.load_threshold == 0.6 and collector.http_interval == 7
+    """
+    cfg = _default_config()
+    cfg.apply_override({"load_threshold": 0.6, "http_interval": 7})
+    assert cfg.strategy.load_threshold == 0.6
+    assert cfg.collector.http_interval == 7
+
+
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        ({"load_threshold": 1.5}, "load_threshold"),
+        ({"http_interval": -1}, "http_interval"),
+    ],
+)
+def test_apply_override_invalid_value_raises(override, match):
+    """
+    Feature: an out-of-range override is rejected by the rebuilt section's validation
+    Description: apply_override with load_threshold=1.5 / http_interval=-1
+    Expectation: raises ConfigError mentioning the offending field
+    """
+    cfg = _default_config()
+    with pytest.raises(ConfigError, match=match):
+        cfg.apply_override(override)
+
+
+# ============================================================
 # E2E integration
 # ============================================================
 

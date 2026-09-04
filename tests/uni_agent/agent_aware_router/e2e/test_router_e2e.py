@@ -79,6 +79,8 @@ def _run_infer(timeout: int = 600) -> str:
         "4096",
         "--prompt-length",
         "3072",
+        "--load-threshold",
+        "0.8",
     ]
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
@@ -118,3 +120,6 @@ class TestKVCAwareRouterE2E:
 
         # 4. Agent loop actually ran (inference summary block at the end)
         assert "inference summary" in log, "run_infer.sh did not finish (no inference summary)"
+
+        # 5. load-threshold == 0.8
+        assert "load_threshold=0.8" in log, "load-threshold != 0.8, the config not work."

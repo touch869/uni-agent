@@ -16,19 +16,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from hydra.errors import InstantiationException
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
+from ..logging import get_router_logger
 from .base import (
     ConfigError,
     StrategyConfig,
     _multiline_repr,
 )
 from .collector import CollectorConfig
+
+logger = get_router_logger("config")
 
 # ============================================================
 # Top-level KVCAwareConfig
@@ -119,6 +122,41 @@ class KVCAwareConfig:
         )
         result.validate()
         return result
+
+    def apply_override(self, override: dict[str, Any] | None) -> None:
+        """Apply a flat runtime override dict onto the declared config fields.
+
+        Keys are matched against the dataclass-declared fields of both config
+        sections (strategy and collector). A matched section is rebuilt from
+        its current declared values plus the override, re-running each field's
+        validation (``__post_init__``) — so an invalid override raises
+        ``ConfigError`` instead of silently poisoning the config. Keys that
+        match no declared field are ignored with a warning; ``None`` values are
+        treated as "not set" and skipped, letting callers pass a partially
+        populated override node unconditionally.
+
+        Args:
+            override: Flat mapping of field name → value (e.g. the
+                ``custom.agent_framework.router`` node of the rollout config).
+        """
+        if not override:
+            return
+        declared_fields: set[str] = set()
+        for section in (self.strategy, self.collector):
+            declared_fields.update(f.name for f in fields(section) if f.init)
+        unknown = sorted(set(override) - declared_fields)
+
+        for section_name, section in (("strategy", self.strategy), ("collector", self.collector)):
+            declared = {f.name for f in fields(section) if f.init}
+            matched = {k: v for k, v in override.items() if k in declared and v is not None}
+            if not matched:
+                continue
+            kwargs = {f.name: getattr(section, f.name) for f in fields(section) if f.init}
+            kwargs.update(matched)
+            setattr(self, section_name, type(section)(**kwargs))
+
+        if unknown:
+            logger.warning(f"apply_override: ignoring unknown override keys: {unknown}")
 
     def validate(self) -> None:
         """Validate the full config. Raises ConfigError with all violations."""
