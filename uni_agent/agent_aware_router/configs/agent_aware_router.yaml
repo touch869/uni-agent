@@ -9,13 +9,12 @@
 
 router_class: uni_agent.agent_aware_router.balancer.KVCAwareBalancer
 
-# strategies is a LIST here (KVCAwareConfig._extract_strategies accepts list or
-# dict). Each item MUST carry _target_ — from_config hydra-instantiates it.
-strategies:
-  - _target_: uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig
-    # overload when load > threshold (load ∈ [0,1], bigger = more loaded)
-    load_threshold: 0.9
+# The strategy node is polymorphic and MUST carry _target_ —
+# from_config hydra-instantiates it.
+strategy:
+  _target_: uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig
+  # overload when load > threshold (load ∈ [0,1], bigger = more loaded)
+  load_threshold: 0.9
 
 collector:
-  http_polling:
-    http_timeout: 10
+  http_interval: 5

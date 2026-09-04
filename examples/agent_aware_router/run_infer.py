@@ -16,16 +16,18 @@ The per-sample score is the trainer's ``rm_scores`` read back from TQ:
 the framework writes it as ``reward_score`` -- no external reward model. Fan-out
 is ``rollout.n`` (``--n``).
 
-The router is wired through verl's plugin mechanism (``rollout.router_config_path``):
-strategy overrides are applied to the packaged
-``uni_agent/agent_aware_router/configs/agent_aware_router.yaml`` and the temp copy is handed
-to verl. ``--task-config`` selects the agent/sandbox per row (required; same YAML
+The router is wired through verl's plugin mechanism (``rollout.router_config_path``),
+which points at the packaged
+``uni_agent/agent_aware_router/configs/agent_aware_router.yaml``. Runtime knob overrides
+(``--load-threshold``) ride on ``rollout.custom.agent_framework.router`` — the balancer
+reads that node from each server's rollout config at construction, so no router-YAML
+rewrite is needed. ``--task-config`` selects the agent/sandbox per row (required; same YAML
 shape as ``examples/inference/parallel_infer_verl.py``); the policy endpoint is
 the gateway session, bound by the runner, not a flag.
 
 KV-cache-aware knobs:
 
-  --router-config-path  router YAML to override + point router_config_path at
+  --router-config-path  router YAML handed to verl via rollout.router_config_path
                         (default uni_agent/agent_aware_router/configs/agent_aware_router.yaml,
                         relative to the repo root)
   --kv-events           vLLM kv-events zmq publisher; the kvcaware collector's load signal
@@ -85,7 +87,7 @@ DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
 
 # Default router plugin YAML (FQN-injected), repo-root relative (pkg:// is no
-# longer supported). Strategy overrides land on a temp copy.
+# longer supported).
 DEFAULT_ROUTER_CONFIG_PATH = "uni_agent/agent_aware_router/configs/agent_aware_router.yaml"
 
 # Ray's default idle-worker reaper (~10 s) kills agent workers between dispatch
@@ -113,57 +115,6 @@ def _resolve_router_config_path(path: str) -> str:
     longer supported (upstream dropped them).
     """
     return os.path.abspath(path)
-
-
-def _write_overridden_router_yaml(
-    *,
-    base_path: str,
-    load_threshold: float | None,
-) -> str:
-    """Resolve the packaged router YAML, apply CLI overrides, write a temp copy.
-
-    The router config is loaded by verl at LLMServerManager init time through
-    ``rollout.router_config_path``. Overrides must land on a real
-    file this driver controls. Defaults come from the packaged YAML
-    (``uni_agent/agent_aware_router/configs/``), matching what a no-flag run loads.
-    """
-    import tempfile
-    import uuid
-
-    from hydra import compose as _compose
-    from hydra import initialize_config_dir as _init_dir
-    from hydra.core.global_hydra import GlobalHydra as _GH
-    from omegaconf import OmegaConf as _OC
-
-    # Load with Hydra defaults expansion (NOT plain OmegaConf.load), matching
-    # verl's ``_load_router_yaml`` semantics (defaults-referenced sub-configs merge
-    # before overrides).
-    resolved = _resolve_router_config_path(base_path)
-    config_dir, config_name = os.path.split(resolved)
-    for ext in (".yaml", ".yml"):
-        if config_name.endswith(ext):
-            config_name = config_name[: -len(ext)]
-            break
-    _GH.instance().clear()
-    with _init_dir(config_dir=config_dir, version_base=None):
-        router_cfg = _compose(config_name=config_name)
-
-    # Composed strategies: dict (defaults composition) or list (single-file YAML).
-    strategies = router_cfg.get("strategies")
-    if hasattr(strategies, "keys"):
-        strat0 = next(iter(strategies.values()))
-    else:
-        strat0 = strategies[0]
-
-    if load_threshold is not None:
-        strat0.load_threshold = load_threshold
-
-    # Save the COMPOSED tree (defaults expanded) so verl reads the temp file
-    # with plain Hydra compose or OmegaConf.load alike.
-    out = os.path.join(tempfile.gettempdir(), f"kvc_aware_router_override_{uuid.uuid4().hex[:8]}.yaml")
-    _OC.save(_OC.create(router_cfg), out)
-    logger.info("Router config overrides written to %s", out)
-    return out
 
 
 def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
@@ -247,14 +198,10 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         }
     rollout.engine_kwargs = {"vllm": vllm_kwargs}
 
-    # Optional kvcaware strategy[0] load_threshold override — falls back to the
-    # packaged YAML when omitted; lands on the temp copy verl loads via
-    # router_config_path.
-    router_yaml = _write_overridden_router_yaml(
-        base_path=args.router_config_path,
-        load_threshold=args.load_threshold,
-    )
-    rollout.router_config_path = router_yaml
+    # Point verl at the router plugin YAML directly — runtime knob overrides are
+    # carried on rollout.custom.agent_framework.router (see below) and read by the
+    # balancer at construction, so no temp-copy rewrite is required.
+    rollout.router_config_path = _resolve_router_config_path(args.router_config_path)
 
     agent_framework_cfg = {
         "gateway_count": args.gateway_count,
@@ -278,6 +225,9 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         task_runner = agent_framework_cfg["agent_runners"]["task"]
         task_runner["runner_fqn"] = args.simulated_runner_fqn
         task_runner["runner_kwargs"] = {}
+    # KV-cache-aware router knobs — the balancer overrides the packaged router
+    # YAML with this node at construction (``custom.agent_framework.router``).
+    agent_framework_cfg["router"] = {"load_threshold": args.load_threshold}
     agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
@@ -518,7 +468,8 @@ def main() -> None:
         type=str,
         default=DEFAULT_ROUTER_CONFIG_PATH,
         help="Router YAML (repo-root relative or absolute) whose strategy[0] is overridden "
-        "and whose temp copy is passed to verl via rollout.router_config_path.",
+        "and passed to verl via rollout.router_config_path (no rewrite; runtime "
+        "knob overrides ride on rollout.custom.agent_framework.router).",
     )
     parser.add_argument(
         "--max-num-seqs",
@@ -559,13 +510,14 @@ def main() -> None:
         help="Device backend (selects the mooncake connector class).",
     )
 
-    # KVCAware router strategy[0] overrides (each falls back to the packaged YAML when omitted).
+    # KVCAware router knobs — carried on rollout.custom.agent_framework.router and
+    # applied by the balancer at construction (override the packaged router YAML).
     parser.add_argument(
         "--load-threshold",
         type=float,
         default=0.9,
-        help="KVCAware strategy[0] load_threshold (overload when load > threshold, (0,1)). "
-        "Overrides the packaged YAML when set.",
+        help="KVCAware load_threshold (overload when load > threshold, (0,1)); "
+        "read by the balancer from rollout.custom.agent_framework.router at construction.",
     )
 
     args = parser.parse_args()

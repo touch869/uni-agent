@@ -16,27 +16,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from hydra.errors import InstantiationException
 from hydra.utils import instantiate
-from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
+from ..logging import get_router_logger
 from .base import (
     ConfigError,
     StrategyConfig,
     _multiline_repr,
 )
-from .cache import CacheStoreConfig
 from .collector import CollectorConfig
+
+logger = get_router_logger("config")
 
 # ============================================================
 # Top-level KVCAwareConfig
 # ============================================================
 
 _DEFAULT_COLLECTOR = CollectorConfig()
-_DEFAULT_CACHE_STORE = CacheStoreConfig()
 
 
 @dataclass(repr=False)
@@ -50,24 +51,22 @@ class KVCAwareConfig:
     obtain this fully-resolved dataclass instance.
 
     Attributes:
-        strategies: Polymorphic strategy list (each with ``_target_``).
+        strategy: Polymorphic strategy config (with ``_target_``).
         collector: Collector module connection-type tuning config.
-        cache_store: CacheStore configuration.
     """
 
-    strategies: list[StrategyConfig]  # required, no default
+    strategy: StrategyConfig  # required, no default
     collector: CollectorConfig = field(default_factory=lambda: _DEFAULT_COLLECTOR)
-    cache_store: CacheStoreConfig = field(default_factory=lambda: _DEFAULT_CACHE_STORE)
 
     @classmethod
     def from_config(cls, cfg: DictConfig | dict) -> KVCAwareConfig:
         """Two-step parsing of VeRL-transmitted config.
 
         Step 1: OmegaConf.merge for auto-recursive dataclass fields
-                (collector, cache_store).
+                (collector).
 
-        Step 2: Manual traversal of strategies (list or dict from Hydra
-                defaults composition) — instantiate each ``_target_`` entry.
+        Step 2: Manual traversal of strategy (dict from Hydra defaults
+                composition) — instantiate its ``_target_`` entry.
         """
         if not isinstance(cfg, DictConfig | dict):
             raise ConfigError(f"cfg must be DictConfig or dict, got {type(cfg)}")
@@ -75,39 +74,32 @@ class KVCAwareConfig:
         cfg = OmegaConf.create(cfg)
 
         # ── Extract polymorphic sections before merge ──────────────
-        # Strategies are polymorphic (_target_); pull them out before the
+        # The strategy is polymorphic (_target_); pull it out before the
         # dataclass-typed merge below. Top-level `_target_` is defensively popped
         # for structured-input compatibility.
-        strategies_raw = _extract_strategies(cfg)
+        strategy_raw = _extract_strategy(cfg)
 
-        # ── Step 1: merge dataclass-typed fields (collector, cache_store) ──
+        # ── Step 1: merge dataclass-typed fields (collector) ──
         defaults = OmegaConf.create(
             {
                 "collector": OmegaConf.structured(CollectorConfig),
-                "cache_store": OmegaConf.structured(CacheStoreConfig),
             }
         )
         kwargs_for_merge = OmegaConf.create(cfg)
         # Remove polymorphic sections to avoid ReadonlyConfigError
-        for key in ("strategies", "_target_"):
+        for key in ("strategy", "_target_"):
             if key in kwargs_for_merge:
                 OmegaConf.set_struct(kwargs_for_merge, False)
                 kwargs_for_merge.pop(key, None)
                 OmegaConf.set_struct(kwargs_for_merge, True)
 
-        # Validate non-dict types for collector/cache_store
+        # Validate non-dict types for collector
         if (
             "collector" in kwargs_for_merge
             and kwargs_for_merge.collector is not None
             and not isinstance(kwargs_for_merge.collector, dict | DictConfig)
         ):
             raise ConfigError(f"collector must be a dict, got {type(kwargs_for_merge.collector).__name__}")
-        if (
-            "cache_store" in kwargs_for_merge
-            and kwargs_for_merge.cache_store is not None
-            and not isinstance(kwargs_for_merge.cache_store, dict | DictConfig)
-        ):
-            raise ConfigError(f"cache_store must be a dict, got {type(kwargs_for_merge.cache_store).__name__}")
 
         merged = OmegaConf.merge(defaults, kwargs_for_merge)
         config_obj = OmegaConf.to_object(merged)
@@ -115,36 +107,61 @@ class KVCAwareConfig:
         # Extract resolved dataclass fields
         if isinstance(config_obj, dict):
             collector_cfg = config_obj.get("collector") or CollectorConfig()
-            cache_store_cfg = config_obj.get("cache_store") or CacheStoreConfig()
         else:
             collector_cfg = getattr(config_obj, "collector", None) or CollectorConfig()
-            cache_store_cfg = getattr(config_obj, "cache_store", None) or CacheStoreConfig()
 
-        # ── Step 2: parse strategies (polymorphic list) ────────────
-        if strategies_raw is None:
-            raise ConfigError("strategies is required — must be explicitly configured")
-        strategies = _parse_polymorphic_list(strategies_raw, StrategyConfig, "strategies")
+        # ── Step 2: parse strategy (polymorphic) ────────────────────
+        if strategy_raw is None:
+            raise ConfigError("strategy is required — must be explicitly configured")
+        strategy = _parse_polymorphic(strategy_raw, StrategyConfig, "strategy")
 
         # ── Validate and construct ─────────────────────────────────
         result = cls(
-            strategies=strategies,
+            strategy=strategy,
             collector=collector_cfg,
-            cache_store=cache_store_cfg,
         )
         result.validate()
         return result
 
+    def apply_override(self, override: dict[str, Any] | None) -> None:
+        """Apply a flat runtime override dict onto the declared config fields.
+
+        Keys are matched against the dataclass-declared fields of both config
+        sections (strategy and collector). A matched section is rebuilt from
+        its current declared values plus the override, re-running each field's
+        validation (``__post_init__``) — so an invalid override raises
+        ``ConfigError`` instead of silently poisoning the config. Keys that
+        match no declared field are ignored with a warning; ``None`` values are
+        treated as "not set" and skipped, letting callers pass a partially
+        populated override node unconditionally.
+
+        Args:
+            override: Flat mapping of field name → value (e.g. the
+                ``custom.agent_framework.router`` node of the rollout config).
+        """
+        if not override:
+            return
+        declared_fields: set[str] = set()
+        for section in (self.strategy, self.collector):
+            declared_fields.update(f.name for f in fields(section) if f.init)
+        unknown = sorted(set(override) - declared_fields)
+
+        for section_name, section in (("strategy", self.strategy), ("collector", self.collector)):
+            declared = {f.name for f in fields(section) if f.init}
+            matched = {k: v for k, v in override.items() if k in declared and v is not None}
+            if not matched:
+                continue
+            kwargs = {f.name: getattr(section, f.name) for f in fields(section) if f.init}
+            kwargs.update(matched)
+            setattr(self, section_name, type(section)(**kwargs))
+
+        if unknown:
+            logger.warning(f"apply_override: ignoring unknown override keys: {unknown}")
+
     def validate(self) -> None:
         """Validate the full config. Raises ConfigError with all violations."""
-        errors: list[str] = []
-
-        if not self.strategies:
-            errors.append("strategies must be non-empty")
-        elif not isinstance(self.strategies, list):
-            errors.append("strategies must be a list")
-
-        if errors:
-            raise ConfigError("; ".join(errors))
+        if not isinstance(self.strategy, StrategyConfig):
+            raise ConfigError(f"strategy must be a StrategyConfig, got {type(self.strategy).__name__}")
 
     def __repr__(self) -> str:
         """Multi-line indented repr (delegates to the shared _multiline_repr)."""
@@ -156,58 +173,35 @@ class KVCAwareConfig:
 # ============================================================
 
 
-def _extract_strategies(cfg: DictConfig) -> list[Any] | None:
-    """Extract strategies from cfg, handling both list and dict formats.
-
-    Hydra defaults composition produces a dict (keyed by strategy name),
-    but direct YAML can be a list. Both are supported.
-    """
-    if "strategies" not in cfg:
-        return None
-    val = cfg["strategies"]
-    if val is None:
-        return None
-    if isinstance(val, list | ListConfig):
-        return list(val)
-    if isinstance(val, dict | DictConfig):
-        # Hydra defaults composition → dict of {name: strategy_cfg}
-        return list(val.values())
-    # Not a list or dict — will be caught by validation
-    return val
+def _extract_strategy(cfg: DictConfig) -> Any | None:
+    """Extract the strategy node from cfg (None when absent or null)."""
+    val = cfg.get("strategy")
+    return val if val is not None else None
 
 
-def _parse_polymorphic_list(
-    items: list[Any],
+def _parse_polymorphic(
+    item: Any,
     base_class: type,
-    list_name: str,
-) -> list[Any]:
-    """Parse a polymorphic list where each item has ``_target_`` for hydra.instantiate.
+    name: str,
+) -> Any:
+    """Parse a polymorphic entry with ``_target_`` for hydra.instantiate.
 
-    Validates that each instantiated item is a subclass of ``base_class``.
+    Validates that the instantiated object is a subclass of ``base_class``.
     """
-    result: list[Any] = []
-    if not items:
-        return result
+    if not isinstance(item, dict | DictConfig):
+        raise ConfigError(f"{name} must be a dict, got {type(item)}")
 
-    for i, item in enumerate(items):
-        if not isinstance(item, dict | DictConfig):
-            raise ConfigError(f"{list_name}[{i}] must be a dict, got {type(item)}")
+    item_conf = OmegaConf.create(item) if isinstance(item, dict) else item
 
-        item_conf = OmegaConf.create(item) if isinstance(item, dict) else item
+    if "_target_" not in item_conf:
+        raise ConfigError(f"{name} must have '_target_' key, got keys: {list(item_conf.keys())}")
 
-        if "_target_" not in item_conf:
-            raise ConfigError(f"{list_name}[{i}] must have '_target_' key, got keys: {list(item_conf.keys())}")
+    try:
+        parsed = instantiate(item_conf)
+    except (InstantiationException, ImportError, AttributeError) as e:
+        raise ConfigError(f"{name} failed to instantiate _target_ '{item_conf._target_}': {e}") from e
 
-        try:
-            parsed = instantiate(item_conf)
-        except (InstantiationException, ImportError, AttributeError) as e:
-            raise ConfigError(f"{list_name}[{i}] failed to instantiate _target_ '{item_conf._target_}': {e}") from e
+    if not isinstance(parsed, base_class):
+        raise ConfigError(f"{name} _target_ must inherit {base_class.__name__}, got {type(parsed).__name__}")
 
-        if not isinstance(parsed, base_class):
-            raise ConfigError(
-                f"{list_name}[{i}] _target_ must inherit {base_class.__name__}, got {type(parsed).__name__}"
-            )
-
-        result.append(parsed)
-
-    return result
+    return parsed

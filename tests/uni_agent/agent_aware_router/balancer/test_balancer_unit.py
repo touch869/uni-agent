@@ -30,6 +30,33 @@ pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 # ============================================================
+# Fake Ray actor handles for rollout-config override tests
+# ============================================================
+
+
+class _RemoteMethod:
+    """Stand-in for a Ray actor method handle: ``.remote()`` returns the value."""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.calls = 0
+
+    def remote(self):
+        self.calls += 1
+        return self._fn()
+
+
+class _RolloutServerHandle:
+    """Fake vLLMHttpServer actor handle exposing the balancer-probed methods."""
+
+    def __init__(self, rollout_cfg, address=("127.0.0.1", 8000)):
+        self._rollout_cfg = rollout_cfg
+        self.get_rollout_config = _RemoteMethod(lambda: self._rollout_cfg)
+        self.get_server_address = _RemoteMethod(lambda: address)
+        self.get_kv_events_endpoints = _RemoteMethod(lambda: None)
+
+
+# ============================================================
 # 5.1 / construction
 # ============================================================
 
@@ -64,9 +91,9 @@ class TestKVCAwareBalancerConstruction:
         with pytest.raises(ValueError):
             KVCAwareBalancer({}, _router_config())
 
-    def test_missing_strategies_raises_config_error(self):
+    def test_missing_strategy_raises_config_error(self):
         """
-        Feature: a config missing strategies is rejected (delegated to from_config)
+        Feature: a config missing strategy is rejected (delegated to from_config)
         Description: KVCAwareBalancer with an empty router_config
         Expectation: raises ConfigError
         """
@@ -103,7 +130,7 @@ class TestTrivialMethods:
         # provider is the injected _FakeCollectorManager in unit tests; real env reports
         # "CollectorManager". Assert it matches the constructed provider's type.
         assert status["provider"] == type(balancer._provider).__name__
-        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]
+        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]  # legacy key; single strategy
         assert set(status["servers"]) == {"s0", "s1"}
         assert status["route_calls"] == 0
 
@@ -276,3 +303,55 @@ class TestEndToEndFlows:
 
         mod = importlib.import_module("uni_agent.agent_aware_router.balancer")
         assert mod.KVCAwareBalancer is KVCAwareBalancer
+
+
+# ============================================================
+# Runtime rollout-config override (custom.agent_framework.router)
+# ============================================================
+
+
+class TestRolloutConfigOverride:
+    """B20+: knobs read from the server rollout config override the router config."""
+
+    @staticmethod
+    def _rollout_cfg(**extra):
+        """Rollout config carrying max_num_seqs/batched_tokens and the router override node."""
+        base = {
+            "custom": {
+                "agent_framework": {
+                    "router": {"load_threshold": 0.75, "http_interval": 3.0},
+                },
+            },
+            "max_num_seqs": 128,
+            "max_num_batched_tokens": 4096,
+        }
+        base.update(extra)
+        return OmegaConf.create(base)
+
+    def test_construction_applies_rollout_override(self, monkeypatch):
+        """
+        Feature: constructor overrides config knobs from the rollout config
+        Description: build the balancer over fake actor handles whose rollout config
+          carries custom.agent_framework.router {load_threshold, http_interval};
+          ray.get is unwrapped to an identity
+        Expectation: strategy.load_threshold / collector.http_interval reflect the
+          override; balancer-attached defaults still land; capacity resolves from
+          the rollout config (max_num_seqs=128)
+        """
+        import uni_agent.agent_aware_router.balancer as balancer_mod
+
+        monkeypatch.setattr(balancer_mod.ray, "get", lambda fut: fut)
+        rollout_cfg = self._rollout_cfg()
+        balancer = KVCAwareBalancer(
+            {"s0": _RolloutServerHandle(rollout_cfg)},
+            _router_config(),
+            provider_factory=_FakeCollectorManager,
+        )
+
+        assert balancer._config.strategy.load_threshold == 0.75
+        assert balancer._config.collector.http_interval == 3.0
+        # non-persisted tuning knobs are still attached after the override rebuild
+        assert balancer._config.strategy.alpha == 0.7
+        assert balancer._config.collector.http_timeout == 10.0
+        # capacity is resolved from the same rollout config
+        assert balancer._strategy._max_num_seqs == 128

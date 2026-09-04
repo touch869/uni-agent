@@ -26,14 +26,12 @@ import pytest
 from omegaconf import OmegaConf
 
 from uni_agent.agent_aware_router.config import (
-    CacheStoreConfig,
     CollectorConfig,
     ConfigError,
     KVCAwareConfig,
     KVCAwareStrategyConfig,
     StrategyConfig,
 )
-from uni_agent.agent_aware_router.types import OverloadMode, SlowCut
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -47,21 +45,19 @@ pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 def test_strategy_default_config():
     """
-    Feature: slow_cut accepts a YAML string and coerces to the SlowCut enum
-    Description: construct strategy config with slow_cut="CAPACITY_TOKEN_AWARE"
-    Expectation: cfg.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE
+    Feature: KVCAwareStrategyConfig has a single persisted field, load_threshold
+    Description: construct strategy config with no kwargs
+    Expectation: cfg.load_threshold == 0.9 and no other tuning fields exist
     """
     cfg = KVCAwareStrategyConfig()
-    assert cfg.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE
-    assert cfg.overload_mode == OverloadMode.KV_CACHE_USAGE_PERC
-    assert cfg.do_shortcut is True
+    assert cfg.load_threshold == 0.9
 
 
 def test_strategy_normal_fields_parse():
     """
-    Feature: strategy fields assign explicit values and fall back to defaults
-    Description: construct KVCAwareStrategyConfig with varied kwargs
-    Expectation: each field equals the expected explicit or default value
+    Feature: load_threshold assigns an explicit value
+    Description: construct KVCAwareStrategyConfig with load_threshold kwarg
+    Expectation: cfg.load_threshold equals the explicit value
     """
     cfg = KVCAwareStrategyConfig(load_threshold=0.5)
     assert cfg.load_threshold == 0.5
@@ -103,9 +99,6 @@ def test_strategy_instantiates_with_explicit_fields_and_defaults():
     assert isinstance(result, KVCAwareStrategyConfig)
     assert isinstance(result, StrategyConfig)
     # defaults filled in
-    assert result.do_shortcut is True
-    assert result.slow_cut == "capacity-token-aware"
-    assert result.overload_mode == "kv_cache_usage_perc"
     assert result.load_threshold == 0.9
 
 
@@ -115,66 +108,40 @@ def test_strategy_instantiates_with_explicit_fields_and_defaults():
 
 
 @pytest.mark.parametrize("wrap", [lambda d: OmegaConf.create(d), lambda d: d], ids=["omegaconf", "plain_dict"])
-def test_from_config_assembles_three_sections(wrap):
+def test_from_config_assembles_sections(wrap):
     """
-    Feature: from_config assembles the three sections into a KVCAwareConfig
-    Description: from_config with a full strategies/collector/cache_store config (OmegaConf or plain dict)
+    Feature: from_config assembles the sections into a KVCAwareConfig
+    Description: from_config with a full strategy/collector config (OmegaConf or plain dict)
     Expectation: result is a KVCAwareConfig with correctly typed sections
     """
     full_config = {
-        "strategies": [
-            {
-                "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
-                "load_threshold": 0.7,
-            },
-        ]
+        "strategy": {
+            "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
+            "load_threshold": 0.7,
+        },
     }
     result = KVCAwareConfig.from_config(full_config)
     assert isinstance(result, KVCAwareConfig)
-    assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
+    assert isinstance(result.strategy, KVCAwareStrategyConfig)
+    assert result.strategy.load_threshold == 0.7
     assert isinstance(result.collector, CollectorConfig)
-    assert isinstance(result.cache_store, CacheStoreConfig)
-
-
-def test_from_config_strategies_dict_converts_to_list():
-    """
-    Feature: strategies given as a mapping auto-converts to a list
-    Description: from_config with strategies in dict form
-    Expectation: result.strategies is a list of KVCAwareStrategyConfig with correct values
-    """
-    kwargs = OmegaConf.create(
-        {
-            "strategies": {
-                "kvc_aware": {
-                    "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
-                },
-            },
-        }
-    )
-    result = KVCAwareConfig.from_config(kwargs)
-    assert isinstance(result.strategies, list)
-    assert len(result.strategies) == 1
-    assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
 
 
 def test_from_config_omitted_sections_take_defaults():
     """
-    Feature: omitted collector/cache_store take their Config defaults
-    Description: from_config with a config containing only strategies
-    Expectation: result.collector/cache_store are CollectorConfig/CacheStoreConfig instances
+    Feature: omitted collector takes its Config default
+    Description: from_config with a config containing only strategy
+    Expectation: result.collector is a CollectorConfig instance
     """
     kwargs = OmegaConf.create(
         {
-            "strategies": [
-                {
-                    "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
-                },
-            ],
+            "strategy": {
+                "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
+            },
         }
     )
     result = KVCAwareConfig.from_config(kwargs)
     assert isinstance(result.collector, CollectorConfig)
-    assert isinstance(result.cache_store, CacheStoreConfig)
 
 
 # ============================================================
@@ -183,57 +150,50 @@ def test_from_config_omitted_sections_take_defaults():
 
 
 @pytest.mark.parametrize(
-    "strategies",
+    "strategy",
     [
-        [],  # empty list
-        "kvc_aware",  # not a list
-        ["kvc_aware"],  # item not dict
+        "kvc_aware",  # not a dict
+        42,  # not a dict
     ],
 )
-def test_strategies_invalid_raises_config_error(strategies):
+def test_strategy_invalid_raises_config_error(strategy):
     """
-    Feature: invalid strategies list triggers from_config validation error
-    Description: from_config with empty list / non-list / item not dict
+    Feature: invalid strategy node triggers from_config validation error
+    Description: from_config with non-dict strategy values
     Expectation: raises ConfigError
     """
-    kwargs = OmegaConf.create({"strategies": strategies})
+    kwargs = OmegaConf.create({"strategy": strategy})
     with pytest.raises(ConfigError):
         KVCAwareConfig.from_config(kwargs)
 
 
 @pytest.mark.parametrize(
-    "strategies,match",
+    "strategy,match",
     [
-        # missing _target_ on a strategy item (list form)
-        ({"strategies": [{}]}, "_target_"),
-        # missing _target_ on a strategy item (dict form)
-        ({"strategies": {"kvc_aware": {}}}, "_target_"),
+        # missing _target_ on the strategy node
+        ({"strategy": {}}, "_target_"),
         # _target_ pointing to a non-StrategyConfig subclass
         (
             {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.agent_aware_router.config.CacheStoreConfig",
-                        "kv_cache_store_type": "list",
-                        "ttl": 30,
-                    },
-                ]
+                "strategy": {
+                    "_target_": "uni_agent.agent_aware_router.config.CollectorConfig",
+                }
             },
             "StrategyConfig",
         ),
-        # empty config — no strategies key at all
-        ({}, "strategies"),
-        # strategies explicitly null
-        ({"strategies": None}, "strategies"),
+        # empty config — no strategy key at all
+        ({}, "strategy"),
+        # strategy explicitly null
+        ({"strategy": None}, "strategy"),
     ],
 )
-def test_from_config_rejects_invalid_strategies(strategies, match):
+def test_from_config_rejects_invalid_strategy(strategy, match):
     """
-    Feature: from_config rejects invalid strategies configuration
-    Description: missing _target_ / non-StrategyConfig _target_ / empty config / null strategies
+    Feature: from_config rejects invalid strategy configuration
+    Description: missing _target_ / non-StrategyConfig _target_ / empty config / null strategy
     Expectation: raises ConfigError matching the relevant keyword
     """
-    kwargs = OmegaConf.create(strategies)
+    kwargs = OmegaConf.create(strategy)
     with pytest.raises(ConfigError, match=match):
         KVCAwareConfig.from_config(kwargs)
 
@@ -251,21 +211,19 @@ def test_from_config_rejects_non_dict_input(bad_cfg):
 
 def test_from_config_aggregates_multiple_errors():
     """
-    Feature: from_config raises on multiple aggregated errors
-    Description: from_config with empty strategies and invalid collector/cache_store
+    Feature: from_config raises on errors from any section
+    Description: from_config with a missing strategy and invalid collector
     Expectation: raises ConfigError whose message contains a relevant field name
     """
     kwargs = OmegaConf.create(
         {
-            "strategies": [],
-            "collector": {"http_polling": {"polling_interval": -1}},
-            "cache_store": {"ttl": 0},
+            "collector": {"http_interval": -1},
         }
     )
     with pytest.raises(ConfigError) as exc_info:
         KVCAwareConfig.from_config(kwargs)
     error_msg = str(exc_info.value)
-    assert "strategies" in error_msg or "polling_interval" in error_msg or "ttl" in error_msg
+    assert "strategy" in error_msg or "http_interval" in error_msg
 
 
 # ============================================================
@@ -283,11 +241,9 @@ def test_top_level_unknown_keys_ignored():
         {
             "_unknown_top_level": "ignored",
             "router_strategy": "should_be_dropped",
-            "strategies": [
-                {
-                    "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
-                },
-            ],
+            "strategy": {
+                "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
+            },
         }
     )
     result = KVCAwareConfig.from_config(kwargs)
@@ -307,27 +263,64 @@ def test_compact_repr():
     """
     kwargs = OmegaConf.create(
         {
-            "strategies": [
-                {
-                    "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
-                },
-            ],
-            "collector": {
-                "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                "long_connection": {
-                    "base_retry_delay": 1.0,
-                    "max_retry_delay": 30.0,
-                    "max_retry_attempts": 5,
-                    "retry_backoff_factor": 2.0,
-                },
+            "strategy": {
+                "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
             },
-            "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
+            "collector": {"http_interval": 5},
         }
     )
     result = KVCAwareConfig.from_config(kwargs)
     r = repr(result)
     assert "\n" in r
     assert r.startswith("KVCAwareConfig(")
+
+
+# ============================================================
+# KVCAwareConfig.apply_override
+# ============================================================
+
+
+def _default_config() -> KVCAwareConfig:
+    """Build a KVCAwareConfig from only a strategy node (defaults elsewhere)."""
+    return KVCAwareConfig.from_config(
+        OmegaConf.create(
+            {
+                "strategy": {
+                    "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
+                },
+            }
+        )
+    )
+
+
+def test_apply_override_updates_both_sections():
+    """
+    Feature: a flat override dict lands on the matching declared fields of both sections
+    Description: apply_override({"load_threshold": 0.6, "http_interval": 7})
+    Expectation: strategy.load_threshold == 0.6 and collector.http_interval == 7
+    """
+    cfg = _default_config()
+    cfg.apply_override({"load_threshold": 0.6, "http_interval": 7})
+    assert cfg.strategy.load_threshold == 0.6
+    assert cfg.collector.http_interval == 7
+
+
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        ({"load_threshold": 1.5}, "load_threshold"),
+        ({"http_interval": -1}, "http_interval"),
+    ],
+)
+def test_apply_override_invalid_value_raises(override, match):
+    """
+    Feature: an out-of-range override is rejected by the rebuilt section's validation
+    Description: apply_override with load_threshold=1.5 / http_interval=-1
+    Expectation: raises ConfigError mentioning the offending field
+    """
+    cfg = _default_config()
+    with pytest.raises(ConfigError, match=match):
+        cfg.apply_override(override)
 
 
 # ============================================================
@@ -362,14 +355,10 @@ def test_packaged_yaml_e2e():
 
     result = KVCAwareConfig.from_config(loaded)
 
-    # ── strategies ──
-    assert isinstance(result.strategies, list)
-    assert len(result.strategies) == 1
-    strategy = result.strategies[0]
+    # ── strategy ──
+    strategy = result.strategy
     assert isinstance(strategy, KVCAwareStrategyConfig)
-    assert strategy.alpha == 0.7
     assert strategy.load_threshold == 0.9
-    assert strategy.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
     # FQN top-level keys are harmless to from_config (extra keys are dropped)
     assert loaded["router_class"] == "uni_agent.agent_aware_router.balancer.KVCAwareBalancer"
     assert not hasattr(result, "router_class")

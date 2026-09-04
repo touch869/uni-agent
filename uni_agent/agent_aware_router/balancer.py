@@ -29,6 +29,7 @@ import time
 from typing import Any, Callable, Optional
 
 import ray
+from omegaconf import DictConfig, OmegaConf
 
 from .collectors import CollectorManager
 from .config import KVCAwareConfig
@@ -39,8 +40,36 @@ from .strategies import (
     StrategyRegistry,
     route,
 )
+from .types import Layer, OverloadMode, SlowCut
 
 logger = get_router_logger("balancer")
+
+# Collector tuning knobs beyond CollectorConfig's persisted ``http_interval``
+# field. CollectorConfig only serializes the user-tunable knob; the balancer
+# attaches the rest as attributes (with these defaults) before handing the
+# config to the collectors, so ``get_collector`` can keep reading them off the
+# config object uniformly (``collectors_config.xxx``).
+_DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
+    "http_timeout": 10.0,
+    "base_retry_delay": 1.0,
+    "max_retry_delay": 30.0,
+    "max_retry_attempts": 5,
+    "retry_backoff_factor": 2.0,
+}
+
+# Strategy tuning knobs beyond KVCAwareStrategyConfig's persisted
+# ``load_threshold`` field. The config only serializes the user-tunable knob;
+# the balancer attaches the rest as attributes (with these defaults) before
+# building the runtime strategy from it, so ``KVCacheAwareStrategy.from_config``
+# can keep reading them off the config object uniformly (``cfg.xxx``).
+_DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
+    "alpha": 0.7,
+    "layer_weights": {Layer.GPU: 0.7, Layer.CPU: 0.2, Layer.SSD: 0.1},
+    "memory_overload_filter": True,
+    "do_shortcut": True,
+    "slow_cut": SlowCut.CAPACITY_TOKEN_AWARE,
+    "overload_mode": OverloadMode.KV_CACHE_USAGE_PERC,
+}
 
 
 class KVCAwareBalancer:
@@ -64,12 +93,15 @@ class KVCAwareBalancer:
         if provider_factory is None:
             provider_factory = CollectorManager
         self._provider_factory = provider_factory
-        self._config = KVCAwareConfig.from_config(config)
-        logger.info(f"KVCAwareBalancer, config={self._config}")
-        primary_cfg = self._config.strategies[0]
-        self._strategy = StrategyRegistry.get(type(primary_cfg)).from_config(primary_cfg)
-        self._strategy_summary = self._build_strategy_summary(self._config.strategies)
+
         self._servers: dict[str, Any] = dict(servers)
+        self._config = self._init_config(config)
+        logger.info(f"KVCAwareBalancer, config={self._config}")
+
+        primary_cfg = self._config.strategy
+        self._strategy = StrategyRegistry.get(type(primary_cfg)).from_config(primary_cfg)
+        self._strategy_summary = self._build_strategy_summary(self._config.strategy)
+
         # Balancer-side in-flight counters (server_id → count), mirroring verl's
         # ``GlobalRequestLoadBalancer._inflight_requests`` — answers the #7115
         # protocol's ``get_total_inflight()`` RPC without depending on collector
@@ -80,6 +112,7 @@ class KVCAwareBalancer:
         if hasattr(self._strategy, "set_capacity"):
             self._strategy.set_capacity(max_num_seqs, max_num_batched_tokens)
         logger.info(f"KVCAwareBalancer: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}")
+
         self._route_calls = 0
         # route() latency profiling — cumulative stats flushed every _ROUTE_LOG_EVERY calls.
         # The flush trigger derives from _route_calls % _ROUTE_LOG_EVERY (a separate
@@ -95,13 +128,12 @@ class KVCAwareBalancer:
         self._init_provider()
 
     @staticmethod
-    def _build_strategy_summary(strategies: list[Any]) -> str:
-        """One-line summary of the first (primary) strategy's key params.
+    def _build_strategy_summary(cfg: Any) -> str:
+        """One-line summary of the strategy's key params.
 
         Only the KVCacheAware tuning knobs that affect routing decisions are
         surfaced: alpha / load_threshold / memory_overload_filter / slow_cut.
         """
-        cfg = strategies[0]
         name = type(cfg).__name__
         bits = []
         for k in ("alpha", "load_threshold", "memory_overload_filter"):
@@ -111,28 +143,71 @@ class KVCAwareBalancer:
             bits.append(f"slow_cut={cfg.slow_cut.value}")
         return f"{name}({', '.join(bits)})"
 
-    def _resolve_rollout_config_int(self, attr: str, default: int) -> int:
-        """Read a positive int ``attr`` from the first server's rollout config.
+    def _fetch_rollout_cfg(self) -> Any | None:
+        """Return the first server's rollout config, or None when unavailable.
 
-        Fail-closed to ``default`` when no server exposes ``get_rollout_config``,
-        the RPC fails, or the value is missing / non-positive. Shared by the
-        ``max_num_seqs`` (per-step request cap) and ``max_num_batched_tokens``
-        (per-step token budget) resolvers.
+        All replicas share the same rollout config, so the first successful RPC
+        wins and the loop exits right away. ``None`` when no server exposes
+        ``get_rollout_config`` or every RPC fails.
         """
         for handle in self._servers.values():
             if not hasattr(handle, "get_rollout_config"):
                 continue
             try:
-                rollout_cfg = ray.get(handle.get_rollout_config.remote())
+                return ray.get(handle.get_rollout_config.remote())
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"get_rollout_config failed ({e}); using default {attr}={default}")
-                return default
-            value = getattr(rollout_cfg, attr, default)
-            if value is None or value <= 0:
-                logger.warning(f"server returned non-positive {attr}={value}; using default={default}")
-                return default
-            return value
-        return default
+                logger.warning(f"get_rollout_config failed on {type(handle).__name__}: {e}")
+                continue
+        return None
+
+    @staticmethod
+    def _read_nested(obj: Any, *keys: str) -> Any:
+        """Walk ``obj`` down ``keys``, accepting mappings or plain objects."""
+        current = obj
+        for key in keys:
+            if current is None:
+                return None
+            if isinstance(current, dict | DictConfig):
+                current = current.get(key)
+            else:
+                current = getattr(current, key, None)
+        return current
+
+    def _fetch_router_override(self) -> dict | None:
+        """Read the runtime router override from the rollout config, if any.
+
+        VeRL configs carry the knob overrides under
+        ``rollout.custom.agent_framework.router`` (a flat mapping of field name
+        → value, e.g. ``load_threshold`` / ``http_interval``). Returns a plain
+        dict, or ``None`` when no rollout config is available or the node is
+        absent / empty.
+        """
+        rollout_cfg = self._fetch_rollout_cfg()
+        if rollout_cfg is None:
+            return None
+        router = self._read_nested(rollout_cfg, "custom", "agent_framework", "router")
+        if not router:
+            return None
+        if isinstance(router, DictConfig):
+            return OmegaConf.to_container(router, resolve=True)
+        return dict(router)
+
+    def _resolve_rollout_config_int(self, attr: str, default: int) -> int:
+        """Read a positive int ``attr`` from the first server's rollout config.
+
+        Fail-closed to ``default`` when no rollout config is available, the RPC
+        fails, or the value is missing / non-positive. Shared by the
+        ``max_num_seqs`` (per-step request cap) and ``max_num_batched_tokens``
+        (per-step token budget) resolvers.
+        """
+        rollout_cfg = self._fetch_rollout_cfg()
+        if rollout_cfg is None:
+            return default
+        value = getattr(rollout_cfg, attr, default)
+        if value is None or value <= 0:
+            logger.warning(f"server returned non-positive {attr}={value}; using default={default}")
+            return default
+        return value
 
     def _resolve_max_num_seqs(self, default: int = 256) -> int:
         """Per-step sequence cap — denominator for the in-flight request load."""
@@ -141,6 +216,28 @@ class KVCAwareBalancer:
     def _resolve_max_num_batched_tokens(self, default: int = 2048) -> int:
         """Per-step token budget — denominator for the in-flight token load."""
         return self._resolve_rollout_config_int("max_num_batched_tokens", default)
+
+    def _init_config(self, config) -> KVCAwareConfig:
+        """Parse the config, apply the runtime rollout override, then attach defaults.
+
+        The override is applied before ``_resolve_config_defaults`` so runtime
+        knobs win over the packaged defaults while the statically attached
+        tuning knobs (which live outside the declared dataclass fields) are
+        preserved by the dataclass rebuild inside ``apply_override``.
+        """
+        _config = KVCAwareConfig.from_config(config)
+        _config.apply_override(self._fetch_router_override())
+        self._resolve_config_defaults(_config.strategy, _DEFAULT_STRATEGY_KNOBS)
+        self._resolve_config_defaults(_config.collector, _DEFAULT_COLLECTOR_KNOBS)
+        return _config
+
+    @staticmethod
+    def _resolve_config_defaults(cfg: Any, defaults: dict[str, Any]) -> Any:
+        """Attach default tuning knobs to one config object in place."""
+        for name, value in defaults.items():
+            if not hasattr(cfg, name):
+                setattr(cfg, name, value)
+        return cfg
 
     def _init_provider(self) -> None:
         """Resolve per-server endpoints from Ray actor handles, then start collectors.
@@ -218,7 +315,7 @@ class KVCAwareBalancer:
         return {
             "servers": list(self._servers.keys()),
             "provider": type(self._provider).__name__,
-            "strategies": [{"type": type(self._strategy).__name__}],
+            "strategies": [{"type": type(self._strategy).__name__}],  # legacy key; single strategy
             "route_calls": self._route_calls,
             "sticky_size": self._store.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),

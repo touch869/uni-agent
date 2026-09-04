@@ -15,13 +15,11 @@
 """KVCAware config types."""
 
 from .base import ConfigError, StrategyConfig
-from .cache import CacheStoreConfig
 from .collector import CollectorConfig
 from .router import KVCAwareConfig
 from .strategy import KVCAwareStrategyConfig
 
 __all__ = [
-    "CacheStoreConfig",
     "CollectorConfig",
     "ConfigError",
     "KVCAwareConfig",
