@@ -128,15 +128,21 @@ class KVCacheAwareStrategy:
     @classmethod
     def from_config(cls, cfg: KVCAwareStrategyConfig) -> KVCacheAwareStrategy:
         """Construct from config. ``max_num_seqs`` is injected by the Balancer
-        via ``set_capacity`` after fetching from the server handle."""
+        via ``set_capacity`` after fetching from the server handle.
+
+        ``KVCAwareStrategyConfig`` only persists ``load_threshold``; the balancer
+        attaches the remaining knobs (with these defaults) before calling this —
+        the ``getattr`` fallbacks keep direct construction from a bare config
+        working too.
+        """
         return cls(
-            alpha=cfg.alpha,
+            alpha=getattr(cfg, "alpha", 0.7),
             load_threshold=cfg.load_threshold,
-            layer_weights=cfg.layer_weights,
-            memory_overload_filter=cfg.memory_overload_filter,
-            do_shortcut=cfg.do_shortcut,
-            slow_cut=cfg.slow_cut,
-            overload_mode=cfg.overload_mode,
+            layer_weights=getattr(cfg, "layer_weights", {Layer.GPU: 0.7, Layer.CPU: 0.2, Layer.SSD: 0.1}),
+            memory_overload_filter=getattr(cfg, "memory_overload_filter", True),
+            do_shortcut=getattr(cfg, "do_shortcut", True),
+            slow_cut=getattr(cfg, "slow_cut", SlowCut.CAPACITY_TOKEN_AWARE),
+            overload_mode=getattr(cfg, "overload_mode", OverloadMode.KV_CACHE_USAGE_PERC),
         )
 
     def _compute_load(

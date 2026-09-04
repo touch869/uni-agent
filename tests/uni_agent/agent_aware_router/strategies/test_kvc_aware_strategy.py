@@ -456,11 +456,11 @@ class TestFromConfig:
         """
         from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
 
-        cfg = KVCAwareStrategyConfig(
-            alpha=0.6,
-            load_threshold=0.85,
-            layer_weights={"gpu": 0.6, "cpu": 0.3, "ssd": 0.1},
-        )
+        cfg = KVCAwareStrategyConfig(load_threshold=0.85)
+        # The config only persists load_threshold; the balancer attaches the
+        # remaining knobs with defaults — mirror that here (with one override).
+        cfg.alpha = 0.6
+        cfg.layer_weights = {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
 
         # ── field mapping ──

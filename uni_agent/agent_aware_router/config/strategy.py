@@ -20,9 +20,8 @@ Concrete routing strategy configs. The matching runtime strategy classes
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from ..types import Layer, OverloadMode, SlowCut
 from .base import ConfigError, StrategyConfig, _multiline_repr
 
 
@@ -30,55 +29,17 @@ from .base import ConfigError, StrategyConfig, _multiline_repr
 class KVCAwareStrategyConfig(StrategyConfig):
     """Config for KVCache-Aware routing strategy.
 
+    Only the user-tunable knob (``load_threshold``) is persisted; the remaining
+    tuning knobs are attached by the Balancer's default-construction step before
+    the runtime strategy is built from this config.
+
     S = α × S_cache + (1-α) × S_load
     """
 
-    alpha: float = 0.7
     load_threshold: float = 0.9
-    layer_weights: dict[Layer, float] = field(default_factory=lambda: {Layer.GPU: 0.7, Layer.CPU: 0.2, Layer.SSD: 0.1})
-    # Sticky short-circuit: when True, a returning session is sent back to its
-    # bound replica only if that replica is NOT overloaded (load > load_threshold).
-    memory_overload_filter: bool = True
-    # Master switch for the sticky short-circuit.
-    do_shortcut: bool = True
-    # Fallback scoring mode used after the sticky short-circuit misses.
-    slow_cut: SlowCut = SlowCut.CAPACITY_TOKEN_AWARE
-    # Overload check mode for the sticky short-circuit (independent of slow_cut).
-    # ``simple`` = kv_cache_usage_perc > load_threshold; ``blended`` = the
-    # original weighted load formula. Default ``blended`` preserves behavior.
-    overload_mode: OverloadMode = OverloadMode.KV_CACHE_USAGE_PERC
 
     def __post_init__(self) -> None:
         if not 0 < self.load_threshold < 1:
             raise ConfigError(f"load_threshold must be in (0, 1), got {self.load_threshold}")
-        if not isinstance(self.memory_overload_filter, bool):
-            raise ConfigError(f"memory_overload_filter must be a bool, got {self.memory_overload_filter!r}")
-        if not isinstance(self.do_shortcut, bool):
-            raise ConfigError(f"do_shortcut must be a bool, got {self.do_shortcut!r}")
-        # Normalize yaml str → SlowCut (also validates the value is a known mode).
-        try:
-            self.slow_cut = SlowCut(self.slow_cut)
-        except ValueError as exc:
-            raise ConfigError(f"slow_cut must be one of {[m.value for m in SlowCut]}, got {self.slow_cut!r}") from exc
-        # Normalize yaml str → OverloadMode (also validates the value is a known mode).
-        try:
-            self.overload_mode = OverloadMode(self.overload_mode)
-        except ValueError as exc:
-            raise ConfigError(
-                f"overload_mode must be one of {[m.value for m in OverloadMode]}, got {self.overload_mode!r}"
-            ) from exc
-        # Normalize yaml str keys → Layer (also validates each key is a known layer).
-        try:
-            self.layer_weights = {Layer(k): v for k, v in self.layer_weights.items()}
-        except ValueError as exc:
-            raise ConfigError(f"layer_weights keys must be layer names, got {set(self.layer_weights)}") from exc
-        if set(self.layer_weights.keys()) != {Layer.GPU, Layer.CPU, Layer.SSD}:
-            raise ConfigError(
-                f"layer_weights must be exactly {{{Layer.GPU}, {Layer.CPU}, {Layer.SSD}}}, "
-                f"got {set(self.layer_weights.keys())}"
-            )
-        weights_sum = sum(self.layer_weights.values())
-        if abs(weights_sum - 1.0) > 1e-6:
-            raise ConfigError(f"layer_weights values must sum to 1.0, got {weights_sum}")
 
     __repr__ = _multiline_repr

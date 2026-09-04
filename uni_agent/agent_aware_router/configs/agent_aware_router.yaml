@@ -17,5 +17,4 @@ strategies:
     load_threshold: 0.9
 
 collector:
-  http_polling:
-    http_timeout: 10
+  http_timeout: 10

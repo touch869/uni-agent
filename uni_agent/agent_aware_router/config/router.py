@@ -28,7 +28,6 @@ from .base import (
     StrategyConfig,
     _multiline_repr,
 )
-from .cache import CacheStoreConfig
 from .collector import CollectorConfig
 
 # ============================================================
@@ -36,7 +35,6 @@ from .collector import CollectorConfig
 # ============================================================
 
 _DEFAULT_COLLECTOR = CollectorConfig()
-_DEFAULT_CACHE_STORE = CacheStoreConfig()
 
 
 @dataclass(repr=False)
@@ -52,19 +50,17 @@ class KVCAwareConfig:
     Attributes:
         strategies: Polymorphic strategy list (each with ``_target_``).
         collector: Collector module connection-type tuning config.
-        cache_store: CacheStore configuration.
     """
 
     strategies: list[StrategyConfig]  # required, no default
     collector: CollectorConfig = field(default_factory=lambda: _DEFAULT_COLLECTOR)
-    cache_store: CacheStoreConfig = field(default_factory=lambda: _DEFAULT_CACHE_STORE)
 
     @classmethod
     def from_config(cls, cfg: DictConfig | dict) -> KVCAwareConfig:
         """Two-step parsing of VeRL-transmitted config.
 
         Step 1: OmegaConf.merge for auto-recursive dataclass fields
-                (collector, cache_store).
+                (collector).
 
         Step 2: Manual traversal of strategies (list or dict from Hydra
                 defaults composition) — instantiate each ``_target_`` entry.
@@ -80,11 +76,10 @@ class KVCAwareConfig:
         # for structured-input compatibility.
         strategies_raw = _extract_strategies(cfg)
 
-        # ── Step 1: merge dataclass-typed fields (collector, cache_store) ──
+        # ── Step 1: merge dataclass-typed fields (collector) ──
         defaults = OmegaConf.create(
             {
                 "collector": OmegaConf.structured(CollectorConfig),
-                "cache_store": OmegaConf.structured(CacheStoreConfig),
             }
         )
         kwargs_for_merge = OmegaConf.create(cfg)
@@ -95,19 +90,13 @@ class KVCAwareConfig:
                 kwargs_for_merge.pop(key, None)
                 OmegaConf.set_struct(kwargs_for_merge, True)
 
-        # Validate non-dict types for collector/cache_store
+        # Validate non-dict types for collector
         if (
             "collector" in kwargs_for_merge
             and kwargs_for_merge.collector is not None
             and not isinstance(kwargs_for_merge.collector, dict | DictConfig)
         ):
             raise ConfigError(f"collector must be a dict, got {type(kwargs_for_merge.collector).__name__}")
-        if (
-            "cache_store" in kwargs_for_merge
-            and kwargs_for_merge.cache_store is not None
-            and not isinstance(kwargs_for_merge.cache_store, dict | DictConfig)
-        ):
-            raise ConfigError(f"cache_store must be a dict, got {type(kwargs_for_merge.cache_store).__name__}")
 
         merged = OmegaConf.merge(defaults, kwargs_for_merge)
         config_obj = OmegaConf.to_object(merged)
@@ -115,10 +104,8 @@ class KVCAwareConfig:
         # Extract resolved dataclass fields
         if isinstance(config_obj, dict):
             collector_cfg = config_obj.get("collector") or CollectorConfig()
-            cache_store_cfg = config_obj.get("cache_store") or CacheStoreConfig()
         else:
             collector_cfg = getattr(config_obj, "collector", None) or CollectorConfig()
-            cache_store_cfg = getattr(config_obj, "cache_store", None) or CacheStoreConfig()
 
         # ── Step 2: parse strategies (polymorphic list) ────────────
         if strategies_raw is None:
@@ -129,7 +116,6 @@ class KVCAwareConfig:
         result = cls(
             strategies=strategies,
             collector=collector_cfg,
-            cache_store=cache_store_cfg,
         )
         result.validate()
         return result

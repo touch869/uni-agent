@@ -26,14 +26,12 @@ import pytest
 from omegaconf import OmegaConf
 
 from uni_agent.agent_aware_router.config import (
-    CacheStoreConfig,
     CollectorConfig,
     ConfigError,
     KVCAwareConfig,
     KVCAwareStrategyConfig,
     StrategyConfig,
 )
-from uni_agent.agent_aware_router.types import OverloadMode, SlowCut
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -47,21 +45,19 @@ pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 def test_strategy_default_config():
     """
-    Feature: slow_cut accepts a YAML string and coerces to the SlowCut enum
-    Description: construct strategy config with slow_cut="CAPACITY_TOKEN_AWARE"
-    Expectation: cfg.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE
+    Feature: KVCAwareStrategyConfig has a single persisted field, load_threshold
+    Description: construct strategy config with no kwargs
+    Expectation: cfg.load_threshold == 0.9 and no other tuning fields exist
     """
     cfg = KVCAwareStrategyConfig()
-    assert cfg.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE
-    assert cfg.overload_mode == OverloadMode.KV_CACHE_USAGE_PERC
-    assert cfg.do_shortcut is True
+    assert cfg.load_threshold == 0.9
 
 
 def test_strategy_normal_fields_parse():
     """
-    Feature: strategy fields assign explicit values and fall back to defaults
-    Description: construct KVCAwareStrategyConfig with varied kwargs
-    Expectation: each field equals the expected explicit or default value
+    Feature: load_threshold assigns an explicit value
+    Description: construct KVCAwareStrategyConfig with load_threshold kwarg
+    Expectation: cfg.load_threshold equals the explicit value
     """
     cfg = KVCAwareStrategyConfig(load_threshold=0.5)
     assert cfg.load_threshold == 0.5
@@ -103,9 +99,6 @@ def test_strategy_instantiates_with_explicit_fields_and_defaults():
     assert isinstance(result, KVCAwareStrategyConfig)
     assert isinstance(result, StrategyConfig)
     # defaults filled in
-    assert result.do_shortcut is True
-    assert result.slow_cut == "capacity-token-aware"
-    assert result.overload_mode == "kv_cache_usage_perc"
     assert result.load_threshold == 0.9
 
 
@@ -115,10 +108,10 @@ def test_strategy_instantiates_with_explicit_fields_and_defaults():
 
 
 @pytest.mark.parametrize("wrap", [lambda d: OmegaConf.create(d), lambda d: d], ids=["omegaconf", "plain_dict"])
-def test_from_config_assembles_three_sections(wrap):
+def test_from_config_assembles_sections(wrap):
     """
-    Feature: from_config assembles the three sections into a KVCAwareConfig
-    Description: from_config with a full strategies/collector/cache_store config (OmegaConf or plain dict)
+    Feature: from_config assembles the sections into a KVCAwareConfig
+    Description: from_config with a full strategies/collector config (OmegaConf or plain dict)
     Expectation: result is a KVCAwareConfig with correctly typed sections
     """
     full_config = {
@@ -133,7 +126,6 @@ def test_from_config_assembles_three_sections(wrap):
     assert isinstance(result, KVCAwareConfig)
     assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
     assert isinstance(result.collector, CollectorConfig)
-    assert isinstance(result.cache_store, CacheStoreConfig)
 
 
 def test_from_config_strategies_dict_converts_to_list():
@@ -159,9 +151,9 @@ def test_from_config_strategies_dict_converts_to_list():
 
 def test_from_config_omitted_sections_take_defaults():
     """
-    Feature: omitted collector/cache_store take their Config defaults
+    Feature: omitted collector takes its Config default
     Description: from_config with a config containing only strategies
-    Expectation: result.collector/cache_store are CollectorConfig/CacheStoreConfig instances
+    Expectation: result.collector is a CollectorConfig instance
     """
     kwargs = OmegaConf.create(
         {
@@ -174,7 +166,6 @@ def test_from_config_omitted_sections_take_defaults():
     )
     result = KVCAwareConfig.from_config(kwargs)
     assert isinstance(result.collector, CollectorConfig)
-    assert isinstance(result.cache_store, CacheStoreConfig)
 
 
 # ============================================================
@@ -213,9 +204,7 @@ def test_strategies_invalid_raises_config_error(strategies):
             {
                 "strategies": [
                     {
-                        "_target_": "uni_agent.agent_aware_router.config.CacheStoreConfig",
-                        "kv_cache_store_type": "list",
-                        "ttl": 30,
+                        "_target_": "uni_agent.agent_aware_router.config.CollectorConfig",
                     },
                 ]
             },
@@ -252,20 +241,19 @@ def test_from_config_rejects_non_dict_input(bad_cfg):
 def test_from_config_aggregates_multiple_errors():
     """
     Feature: from_config raises on multiple aggregated errors
-    Description: from_config with empty strategies and invalid collector/cache_store
+    Description: from_config with empty strategies and invalid collector
     Expectation: raises ConfigError whose message contains a relevant field name
     """
     kwargs = OmegaConf.create(
         {
             "strategies": [],
-            "collector": {"http_polling": {"polling_interval": -1}},
-            "cache_store": {"ttl": 0},
+            "collector": {"http_timeout": -1},
         }
     )
     with pytest.raises(ConfigError) as exc_info:
         KVCAwareConfig.from_config(kwargs)
     error_msg = str(exc_info.value)
-    assert "strategies" in error_msg or "polling_interval" in error_msg or "ttl" in error_msg
+    assert "strategies" in error_msg or "http_timeout" in error_msg
 
 
 # ============================================================
@@ -312,16 +300,7 @@ def test_compact_repr():
                     "_target_": "uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig",
                 },
             ],
-            "collector": {
-                "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                "long_connection": {
-                    "base_retry_delay": 1.0,
-                    "max_retry_delay": 30.0,
-                    "max_retry_attempts": 5,
-                    "retry_backoff_factor": 2.0,
-                },
-            },
-            "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
+            "collector": {"http_timeout": 10},
         }
     )
     result = KVCAwareConfig.from_config(kwargs)
@@ -367,9 +346,7 @@ def test_packaged_yaml_e2e():
     assert len(result.strategies) == 1
     strategy = result.strategies[0]
     assert isinstance(strategy, KVCAwareStrategyConfig)
-    assert strategy.alpha == 0.7
     assert strategy.load_threshold == 0.9
-    assert strategy.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
     # FQN top-level keys are harmless to from_config (extra keys are dropped)
     assert loaded["router_class"] == "uni_agent.agent_aware_router.balancer.KVCAwareBalancer"
     assert not hasattr(result, "router_class")
