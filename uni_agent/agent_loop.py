@@ -90,11 +90,13 @@ class UniAgentLoop(AgentLoopBase):
                 max_entries=cache_entries,
                 max_tokens=cache_tokens,
             )
-        elif UniAgentLoop._observation_cache is None:
-            UniAgentLoop._observation_cache = ObservationCache(
-                max_entries=cache_entries,
-                max_tokens=cache_tokens,
-            )
+        else:
+            if UniAgentLoop._observation_cache is None:
+                UniAgentLoop._observation_cache = ObservationCache(
+                    max_entries=cache_entries,
+                    max_tokens=cache_tokens,
+                )
+            self.observation_cache = UniAgentLoop._observation_cache
         self.interaction = AgentInteraction(
             run_id=self.run_id,
             env=self.env,
