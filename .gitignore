@@ -132,3 +132,4 @@ outputs
 
 # Local OpenYuanRong/AKernel credentials
 examples/blackbox_recipes/openyuanrong.env
+*.orig
