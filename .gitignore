@@ -1,4 +1,5 @@
 
+core
 **/*.pt
 **/checkpoints
 **/wget-log
