@@ -32,6 +32,10 @@ class ActionIncorrectSyntaxError(Exception):
 class TerminalNotAliveError(Exception):
     pass
 
+def normalize_volatile_observation(observation: str) -> str:
+    return re.sub(r"(?<= at )0x[0-9A-Fa-f]+(?=>)", "0xADDR", observation)
+
+
 
 class AgentEnvConfig(BaseModel):
     deployment: DeployConfig = Field(description="Deployment configuration")
@@ -39,6 +43,10 @@ class AgentEnvConfig(BaseModel):
         default=None, description="Optional environment variables to set after start"
     )
     post_setup_cmd: str | None = Field(default=None, description="Command to run after environment startup")
+    normalize_volatile_observations: bool = Field(
+        default=False,
+        description="Replace process-specific Python repr addresses in observations",
+    )
     tool_install_dir: Path = Field(
         default=Path("/usr/local/bin"), description="Directory where tool scripts are installed"
     )
@@ -62,6 +70,7 @@ class AgentEnv:
         self.deployment = env_config.deployment.get_deployment(run_id)
         self.env_variables = env_config.env_variables
         self.post_setup_cmd = env_config.post_setup_cmd
+        self.normalize_volatile_observations = env_config.normalize_volatile_observations
         self.tool_install_dir = env_config.tool_install_dir
         self.logger = get_logger("environment", run_id)
 
@@ -160,6 +169,8 @@ class AgentEnv:
         try:
             observation = await self.communicate(input=action_cmd, timeout=action_timeout, check="ignore")
             observation = re.sub(r"\x1b\[[0-9;]*m|\r", "", observation).strip()
+            if self.normalize_volatile_observations:
+                observation = normalize_volatile_observation(observation)
             if observation == "":
                 observation = "Your command ran successfully and did not produce any output."
             elif len(observation) > max_observation_length:

@@ -153,6 +153,27 @@ class ModalDeploymentConfig(BaseModel):
         return ModalDeployment.from_config(self, run_id)
 
 
+class OpenYuanRongDeploymentConfig(BaseModel):
+    """Configuration for an OpenYuanRong/AKernel remote sandbox."""
+
+    type: Literal["openyuanrong"] = "openyuanrong"
+    image: str = Field(description="Remote sandbox image")
+    cpu: int = 2000
+    memory: int = 4096
+    cpu_limit: int = 8000
+    mem_limit: int = 12288
+    idle_timeout: int = 7200
+    name_prefix: str | None = "uni-agent-"
+    sandbox_kwargs: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
+
+    def get_deployment(self, run_id: str):
+        from .openyuanrong.deployment import OpenYuanRongDeployment
+
+        return OpenYuanRongDeployment.from_config(self, run_id)
+
+
 class VefaasDeploymentConfig(BaseModel):
     """Configuration for veFaaS deployment."""
 
@@ -187,6 +208,7 @@ DeployConfig: TypeAlias = Annotated[
     | LocalAttachDeploymentConfig
     | HostDeploymentConfig
     | LocalNativeDeploymentConfig
-    | ModalDeploymentConfig,
+    | ModalDeploymentConfig
+    | OpenYuanRongDeploymentConfig,
     Field(discriminator="type"),
 ]

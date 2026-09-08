@@ -1,13 +1,44 @@
 import asyncio
-import uuid
+import copy
+import hashlib
+import json
+from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
 
+from uni_agent.toolcall_spec import stable_signature, tool_schema_signature
 from uni_agent.utils import get_event_loop, simple_timer
 
 
 class MaxTokenExceededError(Exception):
     pass
+
+
+def stable_json_hash(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def token_ids_hash(token_ids: list[int]) -> str:
+    """Hash token IDs using a canonical representation independent of tensor dtype."""
+    return stable_json_hash([int(token_id) for token_id in token_ids])
+
+
+def text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class CandidateQueryOutput:
+    """One model-only assistant turn generated from an isolated cache."""
+
+    response: str
+    tool_calls: list[dict]
+    rollout_cache: dict[str, Any]
+    generation_info: dict[str, Any]
+    context_ids: list[int]
 
 
 class AgentChatModel:
@@ -24,6 +55,7 @@ class AgentChatModel:
     """Sampling parameters for the model"""
 
     tools_schemas: list[dict] = None
+    supports_toolcall_speculation = True
 
     def __init__(self, **data):
         for key, value in data.items():
@@ -32,6 +64,68 @@ class AgentChatModel:
 
     def set_tools_schemas(self, tools_schemas: list[dict]) -> None:
         self.tools_schemas = tools_schemas
+
+    @property
+    def tool_schema_signature(self) -> str:
+        return tool_schema_signature(self.tools_schemas)
+
+    @property
+    def sampling_signature(self) -> str:
+        return stable_signature(self.sampling_params)
+
+    @property
+    def current_policy_version(self) -> int | str | None:
+        for owner in (self, self.client):
+            for attribute in ("policy_version", "global_steps", "model_version"):
+                value = getattr(owner, attribute, None)
+                if value is not None:
+                    return value
+        return None
+
+    def clone_rollout_cache(self, rollout_cache: dict[str, Any], candidate_id: str | None = None) -> dict[str, Any]:
+        clone = dict(rollout_cache)
+        clone["request_id"] = candidate_id or f"candidate-{token_ids_hash(rollout_cache.get('prompt_ids', []))[:24]}"
+        clone["prompt_ids"] = list(rollout_cache.get("prompt_ids", []))
+        clone["response_mask"] = list(rollout_cache.get("response_mask", []))
+        clone["response_logprobs"] = list(rollout_cache.get("response_logprobs", []))
+        clone["metrics"] = copy.deepcopy(rollout_cache.get("metrics", {}))
+        clone["extra_fields"] = copy.deepcopy(rollout_cache.get("extra_fields", {}))
+        return clone
+
+    async def encode_tool_messages(self, tool_messages: list[dict[str, Any]]) -> list[int]:
+        return await self._get_new_message_ids(tool_messages)
+
+    @staticmethod
+    def append_encoded_messages_to_rollout_cache(
+        encoded_message_ids: list[int], rollout_cache: dict[str, Any]
+    ) -> dict[str, Any]:
+        rollout_cache["prompt_ids"] += encoded_message_ids
+        rollout_cache["response_mask"] += [0] * len(encoded_message_ids)
+        if rollout_cache["response_logprobs"]:
+            rollout_cache["response_logprobs"] += [0.0] * len(encoded_message_ids)
+        return rollout_cache
+
+    async def query_candidate(
+        self,
+        rollout_cache: dict[str, Any],
+        predicted_tool_message_ids: list[int],
+        *,
+        sampling_params: dict[str, Any] | None = None,
+    ) -> CandidateQueryOutput:
+        self.append_encoded_messages_to_rollout_cache(predicted_tool_message_ids, rollout_cache)
+        context_ids = list(rollout_cache["prompt_ids"])
+        response, tool_calls, rollout_cache, generation_info = await self.query(
+            messages=[{"role": "tool", "content": "<speculative-observation>"}],
+            rollout_cache=rollout_cache,
+            sampling_params=sampling_params or self.sampling_params,
+        )
+        return CandidateQueryOutput(
+            response=response,
+            tool_calls=tool_calls,
+            rollout_cache=rollout_cache,
+            generation_info=generation_info,
+            context_ids=context_ids,
+        )
 
     async def prepare_rollout_cache(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         from verl.utils.tokenizer import normalize_token_ids
@@ -46,8 +140,10 @@ class AgentChatModel:
             ),
         )
         prompt_ids = normalize_token_ids(prompt_ids)
+        prompt_hash = token_ids_hash(prompt_ids)
+        request_key = str(getattr(self, "request_key", "0"))
         return {
-            "request_id": str(uuid.uuid4()),
+            "request_id": f"agent-{stable_json_hash({'prompt_hash': prompt_hash, 'request_key': request_key})[:24]}",
             "prompt_ids": prompt_ids,
             "response_mask": [],
             "response_logprobs": [],
@@ -67,23 +163,15 @@ class AgentChatModel:
         invalid_roles = [message["role"] for message in new_messages if message["role"] not in valid_roles]
         assert not invalid_roles, f"New messages must be user or tool, but got invalid roles: {invalid_roles}"
 
-        # encode tool response
-        tool_response_ids = await self._get_new_message_ids(new_messages)
-
-        # append tool response to prompt
-        rollout_cache["prompt_ids"] += tool_response_ids
-        rollout_cache["response_mask"] += [0] * len(tool_response_ids)
-        if rollout_cache["response_logprobs"]:
-            rollout_cache["response_logprobs"] += [0.0] * len(tool_response_ids)
-
-        return rollout_cache
+        tool_response_ids = await self.encode_tool_messages(new_messages)
+        return self.append_encoded_messages_to_rollout_cache(tool_response_ids, rollout_cache)
 
     async def query(
         self,
         messages: list[dict[str, str]],
         rollout_cache: dict[str, Any] | None,
         **kwargs,
-    ) -> tuple[str, list[dict], dict[str, Any], dict[str, int]]:
+    ) -> tuple[str, list[dict], dict[str, Any], dict[str, Any]]:
         """Run one model call. Returns ``(text, tool_calls, rollout_cache,
         generation_info)``. ``tool_calls`` is always ``[]`` on the training
         path -- verl returns token ids, so callers must parse ``text``.
@@ -110,11 +198,14 @@ class AgentChatModel:
             metrics["num_preempted"] = token_output.num_preempted if token_output.num_preempted is not None else -1
         else:
             metrics["num_preempted"] += token_output.num_preempted if token_output.num_preempted is not None else 0
+        response_ids = list(token_output.token_ids)
         generation_info = {
             "prompt_tokens": len(prompt_ids),
-            "completion_tokens": len(token_output.token_ids),
+            "completion_tokens": len(response_ids),
+            "prompt_hash": token_ids_hash(prompt_ids),
+            "response_hash": token_ids_hash(response_ids),
+            "hash_basis": "token_ids_sha256",
         }
-        response_ids = token_output.token_ids
         rollout_cache["prompt_ids"] += response_ids
         rollout_cache["response_mask"] += [1] * len(response_ids)
         if token_output.log_probs is not None:
@@ -128,6 +219,7 @@ class AgentChatModel:
             if max_global_steps is not None:
                 rollout_cache["extra_fields"]["max_global_steps"] = max_global_steps
         response_str = await self.loop.run_in_executor(None, lambda: self.tokenizer.decode(response_ids))
+        generation_info["response_text_hash"] = text_hash(response_str)
 
         if len(rollout_cache["prompt_ids"]) >= self.max_model_len:
             raise MaxTokenExceededError(
@@ -138,8 +230,8 @@ class AgentChatModel:
         return response_str, [], rollout_cache, generation_info
 
     async def _get_new_message_ids(self, new_messages: list[dict[str, Any]]) -> list[int]:
-        from verl.utils.tokenizer.chat_template import apply_chat_template
         from verl.utils.tokenizer import normalize_token_ids
+        from verl.utils.tokenizer.chat_template import apply_chat_template
 
         tokenized_prompt = await self.loop.run_in_executor(
             None,
@@ -154,8 +246,8 @@ class AgentChatModel:
 
     @cached_property
     def message_boundary_tokens(self) -> list[int]:
-        from verl.utils.tokenizer.chat_template import apply_chat_template
         from verl.utils.tokenizer import normalize_token_ids
+        from verl.utils.tokenizer.chat_template import apply_chat_template
 
         dummy_history = [
             {"role": "user", "content": "dummy user"},
@@ -216,6 +308,7 @@ class OpenAICompatibleChatModel:
     """HTTP timeout in seconds"""
 
     tools_schemas: list[dict] = None
+    supports_toolcall_speculation = False
 
     def __init__(self, **data):
         for key, value in data.items():
@@ -295,7 +388,7 @@ class OpenAICompatibleChatModel:
         messages: list[dict[str, str]],
         rollout_cache: dict[str, Any] | None,
         **kwargs,
-    ) -> tuple[str, list[dict], dict[str, Any], dict[str, int]]:
+    ) -> tuple[str, list[dict], dict[str, Any], dict[str, Any]]:
         """Run one chat-completion call. Returns ``(text, tool_calls,
         rollout_cache, generation_info)``. ``tool_calls`` is the OpenAI
         ``{"id", "type", "function": {"name", "arguments"}}`` shape (one
@@ -335,6 +428,17 @@ class OpenAICompatibleChatModel:
         usage = chat_completion.usage
         completion_tokens = usage.completion_tokens if usage is not None else max(len(response_content.split()), 1)
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
+        prompt_payload = {"messages": api_messages, "tools": self.tools_schemas}
+        response_payload = {
+            "content": response_content,
+            "tool_calls": [
+                {
+                    "type": tool_call["type"],
+                    "function": tool_call["function"],
+                }
+                for tool_call in serialized_tool_calls
+            ],
+        }
         return (
             response_content,
             serialized_tool_calls,
@@ -342,5 +446,9 @@ class OpenAICompatibleChatModel:
             {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
+                "prompt_hash": stable_json_hash(prompt_payload),
+                "response_hash": stable_json_hash(response_payload),
+                "response_text_hash": text_hash(response_content),
+                "hash_basis": "canonical_api_payload_sha256",
             },
         )

@@ -1,0 +1,51 @@
+- name: swe_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 64
+  log_dir: /tmp/swebench_qwen3_coder
+  mask_abnormal_exit_traj: false
+  # SWE-Lego-Qwen3-8B emits JSON inside <tool_call> tags.
+  tool_parser: hermes
+
+  interaction:
+    # V1 Toolcall+: single eligible read-only call, real tool always executes.
+    toolcall_speculation_enabled: true
+    toolcall_cache_max_entries: 1024
+    toolcall_cache_max_tokens: 1000000
+    action_timeout: 300
+    max_turns: 100
+    # Keep the long rollout budget, but cap each model call so one malformed
+    # response cannot consume tens of thousands of tokens.
+    max_generation_tokens: 8192
+    # Keep the current control policy: an observation-matched candidate may
+    # finish for up to 30s after the real tool returns. Metrics distinguish
+    # successful waiting from timeout/validation-failure waiting.
+    toolcall_candidate_wait_timeout: 30
+
+  env:
+    deployment:
+      type: openyuanrong
+      cpu: 2000
+      memory: 4096
+      cpu_limit: 8000
+      mem_limit: 12288
+      idle_timeout: 7200
+      name_prefix: uni-agent-toolcall-
+    env_variables:
+      PIP_PROGRESS_BAR: "off"
+      PIP_CACHE_DIR: "~/.cache/pip"
+      PAGER: "cat"
+      MANPAGER: "cat"
+      LESS: "-R"
+      TQDM_DISABLE: "1"
+      GIT_PAGER: "cat"
+    normalize_volatile_observations: true
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+
+  reward:
+    eval_timeout: 600

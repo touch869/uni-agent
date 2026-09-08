@@ -15,6 +15,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 cd "${REPO_ROOT}"
 
+ENV_FILE="${ENV_FILE:-${REPO_ROOT}/examples/blackbox_recipes/openyuanrong.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+    set -a
+    source "${ENV_FILE}"
+    set +a
+fi
+
 # ── Model & data ─────────────────────────────────────────────────────────
 MODEL_PATH="${MODEL_PATH:-${HOME}/models/Qwen3.5-9B}"
 TRAIN_DATA="${TRAIN_DATA:-${HOME}/data/swe_agent/swe_rebench_filtered.parquet}"
@@ -112,9 +119,9 @@ RUNNER_ARGS=(
 )
 
 # ── AKernel (remote sandbox) ─────────────────────────────────────────────
-AKERNEL_SERVER_ADDRESS="${AKERNEL_SERVER_ADDRESS:-}"
-AKERNEL_TOKEN="${AKERNEL_TOKEN:-}"
-AKERNEL_TUNNEL_SSL_VERIFY="${AKERNEL_TUNNEL_SSL_VERIFY:-0}"
+AKERNEL_SERVER_ADDRESS="${AKERNEL_SERVER_ADDRESS:-${OPENYUANRONG_SERVER_ADDRESS:-}}"
+AKERNEL_TOKEN="${AKERNEL_TOKEN:-${OPENYUANRONG_TOKEN:-}}"
+AKERNEL_TUNNEL_SSL_VERIFY="${AKERNEL_TUNNEL_SSL_VERIFY:-${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}}"
 
 # ── Logging & checkpointing ──────────────────────────────────────────────
 PROJECT_NAME="${PROJECT_NAME:-swe_agent_blackbox}"
@@ -211,8 +218,7 @@ else
 fi
 if ! timeout "${RAY_STATUS_TIMEOUT}" ray status &>/dev/null; then
     echo "Starting Ray cluster (${TOTAL_GPUS} GPUs)..."
-    # ray start --head --num-gpus="${TOTAL_GPUS}" --disable-usage-stats
-    ray start --head --resources='{"NPU": 8}' --disable-usage-stats
+    ray start --head --num-gpus="${TOTAL_GPUS}" --disable-usage-stats
 else
     echo "Ray cluster already running."
 fi
@@ -259,7 +265,7 @@ MAIN_CMD=(
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=align' \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=true' \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true' \
-    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=${MAX_TURNS} \
+    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=${AGENT_MAX_TURNS} \
     actor_rollout_ref.rollout.agent.num_workers=${NUM_AGENT_WORKERS} \
     "${RUNNER_ARGS[@]}" \
     actor_rollout_ref.actor.clip_ratio_low=${CLIP_RATIO_LOW} \
@@ -295,12 +301,13 @@ MAIN_CMD=(
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.nnodes=${NNODES} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
-    "$@"
 )
 
 if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
     MAIN_CMD+=(trainer.total_training_steps=${TOTAL_TRAINING_STEPS})
 fi
+
+MAIN_CMD+=("$@")
 
 if [[ "${RAY_SUBMIT_MODE}" == "job" ]]; then
     ray job submit --no-wait --working-dir="${WORKING_DIR}" "${RUNTIME_ENV_ARGS[@]}" -- "${MAIN_CMD[@]}"

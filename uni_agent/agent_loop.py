@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import pickle
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,12 @@ from uni_agent.interaction import (
 )
 from uni_agent.reward import load_reward_spec
 from uni_agent.skills import SkillsManager, SkillsManagerConfig
+from uni_agent.toolcall_spec import (
+    TOOLCALL_METRIC_DEFAULTS,
+    ObservationCache,
+    finalize_toolcall_metrics,
+    initialize_toolcall_metrics,
+)
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
 from verl.experimental.agent_loop.utils import resolve_config_path
 
@@ -44,6 +52,7 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 class UniAgentLoop(AgentLoopBase):
     _semaphore: asyncio.Semaphore | None = None
+    _observation_cache: ObservationCache | None = None
     # Cached (num_hidden_layers, num_experts_per_tok) of the rollout model. Used to
     # synthesize a zero ``routed_experts`` for failed/empty trajectories when router
     # replay (R3) is enabled. ``None`` after resolution means no replay tensor is needed
@@ -53,6 +62,7 @@ class UniAgentLoop(AgentLoopBase):
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         config_dict = self._init_config(sampling_params, **kwargs)
+        skip_reward_evaluation = bool(config_dict.get("skip_reward_evaluation", False))
         self.mask_abnormal_exit_traj = config_dict.get("mask_abnormal_exit_traj", False)
         global_concurrent = config_dict.get("concurrency", 512)
         num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
@@ -64,13 +74,29 @@ class UniAgentLoop(AgentLoopBase):
         self.logger = get_logger("agent-loop", run_id=self.run_id)
         # init chat model, tools manager and environment
         self.chat_model = self._init_chat_model(config_dict["model"])
+        tool_parser_name = config_dict.get("tool_parser", "qwen3_coder")
         self.tools_manager = self._init_tools_manager(
             tools_config_list=config_dict["tools"],
-            parser=config_dict.get("tool_parser", "qwen3_coder"),
+            parser=tool_parser_name,
         )
         self.skills_manager = self._init_skills_manager(config_dict.get("skills"))
         self.env = self._init_env(config_dict["env"])
         self.output_dir = Path(config_dict["log_dir"]) / self.run_id
+        interaction_config = dict(config_dict["interaction"])
+        cache_entries = int(interaction_config.pop("toolcall_cache_max_entries", 1024))
+        cache_tokens = int(interaction_config.pop("toolcall_cache_max_tokens", 1_000_000))
+        if skip_reward_evaluation:
+            self.observation_cache = ObservationCache(
+                max_entries=cache_entries,
+                max_tokens=cache_tokens,
+            )
+        else:
+            if UniAgentLoop._observation_cache is None:
+                UniAgentLoop._observation_cache = ObservationCache(
+                    max_entries=cache_entries,
+                    max_tokens=cache_tokens,
+                )
+            self.observation_cache = UniAgentLoop._observation_cache
         self.interaction = AgentInteraction(
             run_id=self.run_id,
             env=self.env,
@@ -78,7 +104,8 @@ class UniAgentLoop(AgentLoopBase):
             tools_manager=self.tools_manager,
             messages=list(kwargs["raw_prompt"]),
             skills_manager=self.skills_manager,
-            **config_dict["interaction"],
+            observation_cache=self.observation_cache,
+            **interaction_config,
         )
         if config_dict["reward"] is not None:
             reward_config = {
@@ -97,10 +124,21 @@ class UniAgentLoop(AgentLoopBase):
             self.logger.info(f"sampling_params: {sampling_params}")
             self.logger.info(f"environment config: {config_dict['env']}")
             self.logger.info(f"tools config: {config_dict['tools']}")
+            self.logger.info(f"tool parser: {tool_parser_name}")
             self.logger.info(f"interaction config: {config_dict['interaction']}")
             self.logger.info(f"mask_abnormal_exit_traj: {self.mask_abnormal_exit_traj}")
             self.logger.info(f"output_dir: {self.output_dir}")
+            interaction_result = None
+            run_succeeded = False
+            reward_executed = False
+            phase_timings_s = {
+                "environment_startup": 0.0,
+                "interaction": 0.0,
+                "reward": 0.0,
+                "teardown": 0.0,
+            }
             try:
+                environment_started_at = time.perf_counter()
                 await self.env.start()
 
                 # tools schemas should be visible to the model
@@ -110,31 +148,51 @@ class UniAgentLoop(AgentLoopBase):
                 if self.skills_manager is not None:
                     await self.env.install_skills(self.skills_manager)
                     self.interaction.inject_skills_manifest()
+                phase_timings_s["environment_startup"] = time.perf_counter() - environment_started_at
 
+                interaction_started_at = time.perf_counter()
                 interaction_result = await self.interaction.run()
+                phase_timings_s["interaction"] = time.perf_counter() - interaction_started_at
                 interaction_result["metrics"] = dict(interaction_result.get("rollout_cache", {}).get("metrics", {}))
 
                 # interaction environment should be visible to the reward spec
                 if self.reward_spec is not None:
+                    reward_started_at = time.perf_counter()
                     reward_score, _ = await self.reward_spec.compute_reward(
                         interaction_result=interaction_result,
                     )
+                    phase_timings_s["reward"] = time.perf_counter() - reward_started_at
+                    reward_executed = True
                     interaction_result["reward_score"] = reward_score
+                elif skip_reward_evaluation:
+                    self.logger.info("Reward evaluation explicitly skipped for controlled benchmark")
+                    interaction_result["reward_score"] = None
                 else:
                     self.logger.warning("No reward spec is provided, reward score will be set to -100")
                     interaction_result["reward_score"] = -100
-
-                self._save_interaction_result(interaction_result)
-                output = await self.convert_to_agent_output(interaction_result)
+                run_succeeded = True
             except Exception as e:
                 self.logger.critical(f"Agent loop failed before producing interaction result: {e}")
-                output = await self._build_empty_agent_output(exit_reason="agent_loop_failed")
+                output = await self._build_empty_agent_output(
+                    exit_reason="agent_loop_failed",
+                    failure_error=f"{type(e).__name__}: {e}",
+                )
             finally:
+                teardown_started_at = time.perf_counter()
                 await self.env.close()
+                phase_timings_s["teardown"] = time.perf_counter() - teardown_started_at
                 cleanup_handlers(self.run_id)
+            if run_succeeded:
+                interaction_result["phase_timings_s"] = phase_timings_s
+                interaction_result["reward_executed"] = reward_executed
+                interaction_result["reward_evaluation_skipped"] = skip_reward_evaluation
+                self._save_interaction_result(interaction_result)
+                output = await self.convert_to_agent_output(interaction_result)
             return output
 
-    async def _build_empty_agent_output(self, exit_reason: str) -> AgentLoopOutput:
+    async def _build_empty_agent_output(
+        self, exit_reason: str, failure_error: str | None = None
+    ) -> AgentLoopOutput:
         self.chat_model.set_tools_schemas(self.tools_manager.tools_schemas)
         rollout_cache = await self.chat_model.prepare_rollout_cache(self.interaction.messages)
         prompt_ids = rollout_cache["prompt_ids"]
@@ -160,6 +218,12 @@ class UniAgentLoop(AgentLoopBase):
         extra_fields["global_steps"] = 0
         extra_fields["min_global_steps"] = 0
         extra_fields["max_global_steps"] = 0
+        metrics = {name: value for name, value in TOOLCALL_METRIC_DEFAULTS.items()}
+        initialize_toolcall_metrics(metrics)
+        finalize_toolcall_metrics(metrics, self.observation_cache)
+        extra_fields["toolcall_plus_metrics"] = metrics
+        if failure_error:
+            extra_fields["agent_loop_error"] = failure_error
 
         return AgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -170,7 +234,7 @@ class UniAgentLoop(AgentLoopBase):
             multi_modal_data={},
             reward_score=0,
             num_turns=0,
-            metrics={},
+            metrics=metrics,
             extra_fields=extra_fields,
         )
 
@@ -221,6 +285,11 @@ class UniAgentLoop(AgentLoopBase):
             "messages": interaction_result["messages"],
             "metrics": interaction_result.get("metrics", {}),
             "reward_score": interaction_result.get("reward_score", None),
+            "phase_timings_s": interaction_result.get("phase_timings_s", {}),
+            "reward_executed": interaction_result.get("reward_executed", False),
+            "reward_evaluation_skipped": interaction_result.get(
+                "reward_evaluation_skipped", False
+            ),
         }
         (self.output_dir / "interaction_result.json").write_text(
             json.dumps(save_content, ensure_ascii=False, indent=2, default=str),
@@ -266,6 +335,20 @@ class UniAgentLoop(AgentLoopBase):
                 "per-sample. Remove `model` from your dataset's tools_kwargs."
             )
         config_dict = _deep_merge(base_config, tools_kwargs)
+        if config_dict.get("skip_reward_evaluation"):
+            config_dict["reward"] = None
+        toolcall_override = os.getenv("UNI_AGENT_TOOLCALL_SPECULATION")
+        if toolcall_override is not None:
+            config_dict.setdefault("interaction", {})["toolcall_speculation_enabled"] = toolcall_override.lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+
+        max_turns_override = os.getenv("UNI_AGENT_MAX_TURNS")
+        if max_turns_override is not None:
+            config_dict.setdefault("interaction", {})["max_turns"] = int(max_turns_override)
 
         rollout_config = self.config.actor_rollout_ref.rollout
         max_model_len = (
@@ -278,6 +361,7 @@ class UniAgentLoop(AgentLoopBase):
             "tokenizer": self.tokenizer,
             "max_model_len": max_model_len,
             "sampling_params": sampling_params,
+            "request_key": str(kwargs.get("priority", kwargs.get("index", 0))),
         }
 
         if not config_dict.get("reward"):
@@ -335,6 +419,16 @@ class UniAgentLoop(AgentLoopBase):
         routed_experts = rollout_cache.get("routed_experts")
         metrics = interaction_result.get("metrics", rollout_cache.get("metrics", {}))
         extra_fields = dict(rollout_cache.get("extra_fields") or {})
+        extra_fields["run_id"] = self.run_id
+        extra_fields["phase_timings_s"] = dict(interaction_result.get("phase_timings_s") or {})
+        extra_fields["reward_executed"] = bool(interaction_result.get("reward_executed", False))
+        extra_fields["reward_evaluation_skipped"] = bool(
+            interaction_result.get("reward_evaluation_skipped", False)
+        )
+        standard_metrics = {"generate_sequences", "tool_calls", "compute_score", "num_preempted"}
+        extra_fields["toolcall_plus_metrics"] = {
+            name: value for name, value in metrics.items() if name not in standard_metrics
+        }
         extra_fields["traj_masked"] = traj_masked
         extra_fields["traj_exit_reason"] = traj_exit_reason
         response_ids = prompt_ids[-len(response_mask) :]

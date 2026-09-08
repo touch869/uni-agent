@@ -37,9 +37,13 @@ SWE_AGENT_TOOL_IMAGE="${SWE_AGENT_TOOL_IMAGE:-swr.cn-east-3.myhuaweicloud.com/op
 SWE_AGENT_RUN_TIMEOUT="${SWE_AGENT_RUN_TIMEOUT:-7200}"
 
 # ── AKernel (remote sandbox) ─────────────────────────────────────────────
-export AKERNEL_SERVER_ADDRESS="${AKERNEL_SERVER_ADDRESS:-}"
-export AKERNEL_TOKEN="${AKERNEL_TOKEN:-}"
+export AKERNEL_SERVER_ADDRESS="${AKERNEL_SERVER_ADDRESS:-${OPENYUANRONG_SERVER_ADDRESS:-}}"
+export AKERNEL_TOKEN="${AKERNEL_TOKEN:-${OPENYUANRONG_TOKEN:-}}"
 export AKERNEL_TUNNEL_SSL_VERIFY="${AKERNEL_TUNNEL_SSL_VERIFY:-0}"
+if [[ -z "${AKERNEL_SERVER_ADDRESS}" || -z "${AKERNEL_TOKEN}" ]]; then
+    echo "ERROR: AKERNEL_SERVER_ADDRESS/OPENYUANRONG_SERVER_ADDRESS and AKERNEL_TOKEN/OPENYUANRONG_TOKEN must be set for the OpenYuanRong remote sandbox." >&2
+    exit 2
+fi
 
 # ── Logging & env ────────────────────────────────────────────────────────
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
@@ -55,7 +59,7 @@ echo "Max samples: ${MAX_SAMPLES}"
 echo "Engine:      ${ENGINE} (TP=${TP})"
 echo "Tool image:  ${SWE_AGENT_TOOL_IMAGE}"
 echo "Batch:       n=${N}, gateway=${GATEWAY_COUNT}, max_sessions=${MAX_CONCURRENT_SESSIONS}"
-if [[ -n "${GATEWAY_MESSAGE_JSONL_PATH}" ]]; then
+if [[ -n "${GATEWAY_MESSAGE_JSONL_PATH:-}" ]]; then
     echo "Messages:    ${GATEWAY_MESSAGE_JSONL_PATH}"
 fi
 echo "========================================="

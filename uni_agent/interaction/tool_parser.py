@@ -1,6 +1,6 @@
 import ast
+import hashlib
 import json
-import uuid
 from typing import Any
 
 import regex
@@ -14,6 +14,225 @@ from uni_agent.interaction.tool_schemas import (
 
 class FunctionCallFormatError(Exception):
     pass
+
+
+def deterministic_tool_call_id(
+    *,
+    step_idx: int,
+    call_index: int,
+    name: str,
+    arguments: Any,
+) -> str:
+    """Return a stable OpenAI-compatible ID for one logical tool call."""
+    payload = {
+        "step_idx": int(step_idx),
+        "call_index": int(call_index),
+        "name": name,
+        "arguments": arguments,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return f"call_{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
+def _strict_json_loads(value: str) -> Any:
+    """Load standards-compliant JSON (Python otherwise accepts NaN/Infinity)."""
+    return json.loads(value, parse_constant=_reject_json_constant)
+
+
+def _next_non_whitespace(value: str, start: int) -> str | None:
+    for char in value[start:]:
+        if not char.isspace():
+            return char
+    return None
+
+
+def _quote_can_close(value: str, quote_index: int) -> bool:
+    cursor = quote_index + 1
+    while cursor < len(value) and value[cursor].isspace():
+        cursor += 1
+    if cursor == len(value) or value[cursor] in (":", "}", "]"):
+        return True
+    if value[cursor] != ",":
+        return False
+
+    cursor += 1
+    while cursor < len(value) and value[cursor].isspace():
+        cursor += 1
+    # A comma inside shell/Python text is normally followed by an identifier.
+    # A JSON member or the next string array item starts with a quote.
+    return cursor == len(value) or value[cursor] in ('"', "}", "]")
+
+
+def _previous_non_whitespace(value: list[str]) -> str | None:
+    for char in reversed(value):
+        if not char.isspace():
+            return char
+    return None
+
+
+def _repair_json_syntax(value: str) -> str | None:
+    """Repair only locally unambiguous JSON-string mistakes.
+
+    This deliberately is not a general JSON-repair parser. It handles the
+    failures repeatedly produced by the SWE-Lego model: raw control characters
+    or invalid backslashes inside strings, quotes inside a string whose next
+    token cannot legally follow a closing quote, and one stray quote between
+    closing containers. The caller must parse and schema-validate the result.
+    """
+    output: list[str] = []
+    in_string = False
+    containers: list[str] = []
+    repairs = 0
+    index = 0
+    valid_escapes = {'"', "\\", "/", "b", "f", "n", "r", "t"}
+    control_escapes = {"\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+    while index < len(value):
+        char = value[index]
+        if not in_string:
+            if char == '"':
+                previous = _previous_non_whitespace(output)
+                following = _next_non_whitespace(value, index + 1)
+                if previous in ("}", "]") and (following in ("}", "]") or following is None):
+                    repairs += 1
+                    index += 1
+                    continue
+                in_string = True
+            elif char in ("{", "["):
+                containers.append("}" if char == "{" else "]")
+            elif char in ("}", "]"):
+                if not containers or containers[-1] != char:
+                    return None
+                containers.pop()
+            output.append(char)
+            index += 1
+            continue
+
+        if char == "\\":
+            following = value[index + 1] if index + 1 < len(value) else None
+            valid_unicode = (
+                following == "u"
+                and index + 5 < len(value)
+                and all(candidate in "0123456789abcdefABCDEF" for candidate in value[index + 2 : index + 6])
+            )
+            if valid_unicode:
+                output.extend(value[index : index + 6])
+                index += 6
+                continue
+            if following in valid_escapes:
+                output.extend((char, following))
+                index += 2
+                continue
+
+            output.append("\\\\")
+            repairs += 1
+            index += 1
+            continue
+
+        if char == '"':
+            if _quote_can_close(value, index):
+                in_string = False
+                output.append(char)
+            else:
+                output.append('\\"')
+                repairs += 1
+            index += 1
+            continue
+
+        if ord(char) < 0x20:
+            escaped = control_escapes.get(char)
+            if escaped is None:
+                escaped = f"\\u{ord(char):04x}"
+            output.append(escaped)
+            repairs += 1
+        else:
+            output.append(char)
+        index += 1
+
+    if in_string:
+        return None
+    if containers:
+        output.extend(reversed(containers))
+        repairs += len(containers)
+    if repairs == 0:
+        return None
+    return "".join(output)
+
+
+def load_json_object(value: str, *, context: str) -> tuple[dict[str, Any], bool]:
+    """Strictly load a JSON object, with one conservative repair attempt."""
+    try:
+        parsed = _strict_json_loads(value)
+        repaired = False
+    except (json.JSONDecodeError, ValueError) as original_error:
+        repaired_value = _repair_json_syntax(value)
+        if repaired_value is None:
+            raise FunctionCallFormatError(f"Invalid {context} JSON: {original_error}.") from None
+        try:
+            parsed = _strict_json_loads(repaired_value)
+        except (json.JSONDecodeError, ValueError):
+            raise FunctionCallFormatError(f"Invalid {context} JSON: {original_error}.") from None
+        repaired = True
+
+    if not isinstance(parsed, dict):
+        raise FunctionCallFormatError(f"Invalid {context}: expected a JSON object, got {type(parsed).__name__}.")
+    return parsed, repaired
+
+
+def validate_function_call(
+    name: str,
+    arguments: dict[str, Any],
+    tools: list[OpenAIFunctionToolSchema],
+) -> None:
+    """Validate function arguments against the advertised tool schema."""
+    tool = next(
+        (candidate for candidate in tools if candidate.type == "function" and candidate.function.name == name),
+        None,
+    )
+    if tool is None:
+        valid_names = sorted(candidate.function.name for candidate in tools if candidate.type == "function")
+        raise FunctionCallFormatError(
+            f"Invalid action: function '{name}' is not defined in the tools list. Allowed functions: {valid_names}."
+        )
+
+    parameters = tool.function.parameters
+    properties = parameters.properties
+    missing = [parameter for parameter in parameters.required if parameter not in arguments]
+    if missing:
+        raise FunctionCallFormatError(f"Invalid arguments for '{name}': missing required parameter(s): {missing}.")
+
+    unknown = sorted(set(arguments) - set(properties))
+    if unknown:
+        raise FunctionCallFormatError(
+            f"Invalid arguments for '{name}': unknown parameter(s): {unknown}. "
+            f"Allowed parameters: {sorted(properties)}."
+        )
+
+    type_checks = {
+        "string": lambda item: isinstance(item, str),
+        "integer": lambda item: type(item) is int,
+        "number": lambda item: type(item) in (int, float),
+        "boolean": lambda item: type(item) is bool,
+        "object": lambda item: isinstance(item, dict),
+        "array": lambda item: isinstance(item, list),
+        "null": lambda item: item is None,
+    }
+    for parameter, argument in arguments.items():
+        property_schema = properties[parameter]
+        expected_type = property_schema.type.lower()
+        checker = type_checks.get(expected_type)
+        if checker is not None and not checker(argument):
+            raise FunctionCallFormatError(
+                f"Invalid argument '{parameter}' for '{name}': expected {expected_type}, got {type(argument).__name__}."
+            )
+        if property_schema.enum is not None and argument not in property_schema.enum:
+            raise FunctionCallFormatError(
+                f"Invalid argument '{parameter}' for '{name}': value {argument!r} is not in {property_schema.enum}."
+            )
 
 
 # modified from qwen3 coder tool parser
@@ -118,7 +337,10 @@ class XMLToolParser:
                 ) from None
 
     def _parse_xml_function_call(
-        self, function_call_str: str, tools: list[OpenAIFunctionToolSchema]
+        self,
+        function_call_str: str,
+        tools: list[OpenAIFunctionToolSchema],
+        call_index: int,
     ) -> OpenAIFunctionToolCall:
         # Extract function name
         if ">" not in function_call_str:
@@ -144,8 +366,18 @@ class XMLToolParser:
 
             param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, function_name)
 
+        validate_function_call(function_name, param_dict, tools)
         function_call = OpenAIFunctionCallSchema(name=function_name, arguments=param_dict)
-        tool_call = OpenAIFunctionToolCall(id=str(uuid.uuid4()), type="function", function=function_call)
+        tool_call = OpenAIFunctionToolCall(
+            id=deterministic_tool_call_id(
+                step_idx=0,
+                call_index=call_index,
+                name=function_name,
+                arguments=param_dict,
+            ),
+            type="function",
+            function=function_call,
+        )
         return tool_call
 
     def _get_function_calls(self, model_output: str) -> list[str]:
@@ -177,7 +409,10 @@ class XMLToolParser:
         function_calls = self._get_function_calls(model_output)
         if not function_calls:
             return model_output, []
-        tool_calls = [self._parse_xml_function_call(function_call_str, tools) for function_call_str in function_calls]
+        tool_calls = [
+            self._parse_xml_function_call(function_call_str, tools, call_index)
+            for call_index, function_call_str in enumerate(function_calls)
+        ]
 
         content_index = model_output.find(self.tool_call_start_token)
         content_index = content_index if content_index >= 0 else model_output.find(self.tool_call_prefix)
@@ -226,38 +461,29 @@ class HermesToolParser:
         if not matches:
             return model_output, []
 
-        valid_names = {tool.function.name for tool in tools if tool.type == "function"}
-
         tool_calls: list[OpenAIFunctionToolCall] = []
-        for raw in matches:
-            tool_calls.append(self._parse_single(raw, valid_names))
+        for call_index, raw in enumerate(matches):
+            tool_calls.append(self._parse_single(raw, tools, call_index))
 
         content_index = model_output.find(self.tool_call_start_token)
         return model_output[:content_index], tool_calls
 
-    def _parse_single(self, raw: str, valid_names: set[str]) -> OpenAIFunctionToolCall:
+    def _parse_single(
+        self,
+        raw: str,
+        tools: list[OpenAIFunctionToolSchema],
+        call_index: int = 0,
+    ) -> OpenAIFunctionToolCall:
         try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise FunctionCallFormatError(
-                f"Invalid tool_call JSON: {e.msg} (line {e.lineno} column {e.colno}). {self._FORMAT_HINT}"
-            ) from None
-
-        if not isinstance(obj, dict):
-            raise FunctionCallFormatError(
-                f"Invalid tool_call: expected a JSON object, got {type(obj).__name__}. {self._FORMAT_HINT}"
-            )
+            obj, _ = load_json_object(raw, context="tool_call")
+        except FunctionCallFormatError as error:
+            raise FunctionCallFormatError(f"{error} {self._FORMAT_HINT}") from None
         if "name" not in obj:
             raise FunctionCallFormatError(f"Invalid tool_call: missing 'name' field. {self._FORMAT_HINT}")
 
         name = obj["name"]
         if not isinstance(name, str):
             raise FunctionCallFormatError(f"Invalid tool_call: 'name' must be a string, got {type(name).__name__}.")
-        if name not in valid_names:
-            raise FunctionCallFormatError(
-                f"Invalid action: function '{name}' is not defined in the tools list.\n"
-                f"Allowed functions should be one of: {sorted(valid_names)}."
-            )
 
         arguments: Any = obj.get("arguments", {})
         if arguments is None:
@@ -265,18 +491,26 @@ class HermesToolParser:
         if isinstance(arguments, str):
             # Some models double-encode arguments as a JSON string; accept that.
             try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError as e:
-                raise FunctionCallFormatError(
-                    f"Invalid arguments JSON for '{name}': {e.msg} (line {e.lineno} column {e.colno})."
-                ) from None
+                arguments, _ = load_json_object(arguments, context=f"arguments for '{name}'")
+            except FunctionCallFormatError:
+                raise
         if not isinstance(arguments, dict):
             raise FunctionCallFormatError(
                 f"Invalid arguments for '{name}': expected a JSON object, got {type(arguments).__name__}."
             )
 
+        validate_function_call(name, arguments, tools)
         function_call = OpenAIFunctionCallSchema(name=name, arguments=arguments)
-        return OpenAIFunctionToolCall(id=str(uuid.uuid4()), type="function", function=function_call)
+        return OpenAIFunctionToolCall(
+            id=deterministic_tool_call_id(
+                step_idx=0,
+                call_index=call_index,
+                name=name,
+                arguments=arguments,
+            ),
+            type="function",
+            function=function_call,
+        )
 
 
 _PARSER_REGISTRY: dict[str, type] = {
