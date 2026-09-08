@@ -1,4 +1,5 @@
 
+core
 **/*.pt
 **/checkpoints
 **/wget-log
@@ -129,3 +130,7 @@ logs
 log
 outputs
 .history
+
+# Local OpenYuanRong/AKernel credentials
+examples/blackbox_recipes/openyuanrong.env
+*.orig

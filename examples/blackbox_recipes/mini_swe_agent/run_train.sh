@@ -15,6 +15,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 cd "${REPO_ROOT}"
 
+ENV_FILE="${ENV_FILE:-${REPO_ROOT}/examples/blackbox_recipes/openyuanrong.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+    set -a
+    source "${ENV_FILE}"
+    set +a
+fi
+
 # ── Model & data ─────────────────────────────────────────────────────────
 MODEL_PATH="${MODEL_PATH:-${HOME}/models/Qwen3.5-9B}"
 TRAIN_DATA="${TRAIN_DATA:-${HOME}/data/swe_agent/swe_rebench_filtered.parquet}"
@@ -53,6 +60,7 @@ ACTOR_LR="${ACTOR_LR:-1e-6}"
 PROMPT_LENGTH="${PROMPT_LENGTH:-4096}"
 RESPONSE_LENGTH="${RESPONSE_LENGTH:-131072}"
 MAX_MODEL_LEN=$((PROMPT_LENGTH + RESPONSE_LENGTH))
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-${MAX_MODEL_LEN}}"
 
 # ── Rollout parameters ───────────────────────────────────────────────────
 ENGINE="${ENGINE:-vllm}"
@@ -67,6 +75,12 @@ TOP_P="${TOP_P:-1.0}"
 TOP_K="${TOP_K:--1}"
 ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.7}"
 UPDATE_WEIGHTS_BUCKET_MB="${UPDATE_WEIGHTS_BUCKET_MB:-2048}"
+MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-}"
+SPECRL_ENABLED="${SPECRL_ENABLED:-false}"
+SPECRL_BIAS="${SPECRL_BIAS:-0.5}"
+SPECRL_SEED="${SPECRL_SEED:-1234}"
+SPECRL_CACHE_MAX_ENTRIES="${SPECRL_CACHE_MAX_ENTRIES:-10000}"
+SPECRL_CACHE_MAX_TOKENS="${SPECRL_CACHE_MAX_TOKENS:-10000000}"
 
 # ── Megatron training parallelism ────────────────────────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
@@ -79,6 +93,7 @@ TRAIN_CP="${TRAIN_CP:-1}"
 OFFLOAD="${OFFLOAD:-True}"
 OPTIMIZER_OFFLOAD_FRACTION="${OFFLOAD_FRACTION:-1.0}"
 USE_MBRIDGE="${USE_MBRIDGE:-True}"
+VANILLA_MBRIDGE="${VANILLA_MBRIDGE:-False}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
 
 # ── Agent parameters ─────────────────────────────────────────────────────
@@ -112,9 +127,9 @@ RUNNER_ARGS=(
 )
 
 # ── AKernel (remote sandbox) ─────────────────────────────────────────────
-AKERNEL_SERVER_ADDRESS="${AKERNEL_SERVER_ADDRESS:-}"
-AKERNEL_TOKEN="${AKERNEL_TOKEN:-}"
-AKERNEL_TUNNEL_SSL_VERIFY="${AKERNEL_TUNNEL_SSL_VERIFY:-0}"
+AKERNEL_SERVER_ADDRESS="${AKERNEL_SERVER_ADDRESS:-${OPENYUANRONG_SERVER_ADDRESS:-}}"
+AKERNEL_TOKEN="${AKERNEL_TOKEN:-${OPENYUANRONG_TOKEN:-}}"
+AKERNEL_TUNNEL_SSL_VERIFY="${AKERNEL_TUNNEL_SSL_VERIFY:-${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}}"
 
 # ── Logging & checkpointing ──────────────────────────────────────────────
 PROJECT_NAME="${PROJECT_NAME:-swe_agent_blackbox}"
@@ -153,6 +168,7 @@ echo "Runner:      ${RUNNER}"
 echo "Turns:       agent_max_turns=${AGENT_MAX_TURNS}"
 echo "Batch:       n=${N}, mini_bsz=${PPO_MINI_BATCH_SIZE}"
 echo "Sequence:    prompt=${PROMPT_LENGTH}, response=${RESPONSE_LENGTH}"
+echo "SPEC-RL:     enabled=${SPECRL_ENABLED}, bias=${SPECRL_BIAS}"
 echo "Trainer:     V1 ${TRAINER_MODE}"
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
     echo "Resources:   trainer=${NNODES}x${N_GPUS_PER_NODE}, rollout=${ROLLOUT_NNODES}x${ROLLOUT_NGPUS_PER_NODE}"
@@ -191,6 +207,7 @@ env_vars = {
         "VERL_LOGGING_LEVEL",
         "RAY_DEDUP_LOGS",
         "PYTHONUNBUFFERED",
+        "TORCH_CUDA_ARCH_LIST",
     )
     if (value := os.environ.get(key)) is not None
 }
@@ -211,8 +228,7 @@ else
 fi
 if ! timeout "${RAY_STATUS_TIMEOUT}" ray status &>/dev/null; then
     echo "Starting Ray cluster (${TOTAL_GPUS} GPUs)..."
-    # ray start --head --num-gpus="${TOTAL_GPUS}" --disable-usage-stats
-    ray start --head --resources='{"NPU": 8}' --disable-usage-stats
+    ray start --head --num-gpus="${TOTAL_GPUS}" --disable-usage-stats
 else
     echo "Ray cluster already running."
 fi
@@ -246,7 +262,7 @@ MAIN_CMD=(
     actor_rollout_ref.rollout.prompt_length=${PROMPT_LENGTH} \
     actor_rollout_ref.rollout.response_length=${RESPONSE_LENGTH} \
     actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN} \
-    actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_MODEL_LEN} \
+    actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS} \
     actor_rollout_ref.rollout.temperature=${TEMPERATURE} \
     actor_rollout_ref.rollout.top_p=${TOP_P} \
     actor_rollout_ref.rollout.top_k=${TOP_K} \
@@ -256,11 +272,15 @@ MAIN_CMD=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"' \
-    '+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=align' \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=true' \
     '+actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true' \
-    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=${MAX_TURNS} \
+    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=${AGENT_MAX_TURNS} \
     actor_rollout_ref.rollout.agent.num_workers=${NUM_AGENT_WORKERS} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.enabled=${SPECRL_ENABLED} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.bias=${SPECRL_BIAS} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.seed=${SPECRL_SEED} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.cache_max_entries=${SPECRL_CACHE_MAX_ENTRIES} \
+    actor_rollout_ref.rollout.custom.agent_framework.specrl.cache_max_tokens=${SPECRL_CACHE_MAX_TOKENS} \
     "${RUNNER_ARGS[@]}" \
     actor_rollout_ref.actor.clip_ratio_low=${CLIP_RATIO_LOW} \
     actor_rollout_ref.actor.clip_ratio_high=${CLIP_RATIO_HIGH} \
@@ -278,6 +298,7 @@ MAIN_CMD=(
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
     actor_rollout_ref.actor.megatron.context_parallel_size=${TRAIN_CP} \
     actor_rollout_ref.actor.megatron.use_mbridge=${USE_MBRIDGE} \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
     actor_rollout_ref.ref.megatron.param_offload=${OFFLOAD} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TRAIN_TP} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
@@ -295,12 +316,17 @@ MAIN_CMD=(
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.nnodes=${NNODES} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
-    "$@"
 )
+
+if [[ -n "${MAMBA_CACHE_MODE}" ]]; then
+    MAIN_CMD+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=${MAMBA_CACHE_MODE}")
+fi
 
 if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
     MAIN_CMD+=(trainer.total_training_steps=${TOTAL_TRAINING_STEPS})
 fi
+
+MAIN_CMD+=("$@")
 
 if [[ "${RAY_SUBMIT_MODE}" == "job" ]]; then
     ray job submit --no-wait --working-dir="${WORKING_DIR}" "${RUNTIME_ENV_ARGS[@]}" -- "${MAIN_CMD[@]}"

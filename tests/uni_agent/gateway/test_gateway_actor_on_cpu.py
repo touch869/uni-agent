@@ -65,6 +65,103 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
 
 
 @pytest.mark.asyncio
+async def test_gateway_actor_max_tokens_clamped_to_actual_model_context_budget():
+    """The encoded context, rather than the configured prompt estimate, controls
+    how much generation room remains under ``max_model_len``."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+    from uni_agent.gateway.session import TrajectoryBuffer
+
+    actor = _GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            response_length=100,
+            max_model_len=70,
+        ),
+        InspectingBackend(),
+    )
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        payload = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200}
+        session = actor._sessions["s1"]
+        session.active_trajectory = TrajectoryBuffer(
+            prompt_ids=[1] * 20,
+            response_ids=[10] * 49,
+            response_mask=[1] * 49,
+        )
+        session.message_history = list(payload["messages"])
+
+        await actor._handle_chat_completions("s1", payload)
+
+        assert actor._backend.calls[-1]["sampling_params"]["max_tokens"] == 1
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_model_context_exhausted_returns_length_without_backend_call():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+    from uni_agent.gateway.session import TrajectoryBuffer
+
+    backend = InspectingBackend()
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=100, max_model_len=70),
+        backend,
+    )
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        payload = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200}
+        session = actor._sessions["s1"]
+        session.active_trajectory = TrajectoryBuffer(
+            prompt_ids=[1] * 20,
+            response_ids=[10] * 50,
+            response_mask=[1] * 50,
+        )
+        session.message_history = list(payload["messages"])
+        backend.calls.clear()
+
+        response = await actor._handle_chat_completions("s1", payload)
+
+        body = json.loads(response.body)
+        assert body["choices"][0]["finish_reason"] == "length"
+        assert body["usage"]["completion_tokens"] == 0
+        assert backend.calls == []
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_max_tokens_clamped_per_request():
+    """A recipe-level per-request cap cannot be raised by the HTTP payload."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    backend = InspectingBackend()
+    actor = _GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            base_sampling_params={"max_tokens": 100},
+            max_tokens_per_request=16,
+        ),
+        backend,
+    )
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        await actor._handle_chat_completions(
+            "s1",
+            {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 80},
+        )
+
+        assert backend.calls[-1]["sampling_params"]["max_tokens"] == 16
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_gateway_actor_continuation_budget_exhausted_materializes_length_stop():
     """When a continuation request would push the total response tokens past
     ``response_length``, the gateway skips the backend call, commits the
@@ -203,6 +300,64 @@ def test_message_normalization_tool_call_arguments(raw_arguments, expected_argum
     )["messages"][0]
 
     assert result["tool_calls"][0]["function"]["arguments"] == expected_arguments
+
+
+@pytest.mark.asyncio
+async def test_message_codec_legacy_bash_fallback_returns_openai_tool_call():
+    """A complete legacy bash block is accepted only for an advertised bash tool."""
+    from uni_agent.gateway.session import MessageCodec
+
+    codec = MessageCodec(
+        FakeTokenizer(),
+        tool_parser_name="qwen3_coder",
+        legacy_bash_tool_fallback=True,
+    )
+    text = "I will inspect the repository.\n<bash>\ncd /testbed && git status\n</bash>"
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+
+    message, finish_reason = await codec.decode_response(
+        [ord(char) for char in text],
+        tools=tools,
+        stop_reason="stop",
+    )
+
+    assert finish_reason == "tool_calls"
+    assert message["content"] == "I will inspect the repository."
+    assert len(message["tool_calls"]) == 1
+    assert message["tool_calls"][0]["function"] == {
+        "name": "bash",
+        "arguments": {"command": "cd /testbed && git status"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_message_codec_legacy_bash_fallback_is_opt_in():
+    """Generic gateways continue treating bash-like XML as plain content."""
+    from uni_agent.gateway.session import MessageCodec
+
+    text = "<bash>pwd</bash>"
+    tools = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+
+    message, finish_reason = await MessageCodec(FakeTokenizer(), tool_parser_name="qwen3_coder").decode_response(
+        [ord(char) for char in text],
+        tools=tools,
+        stop_reason="stop",
+    )
+
+    assert finish_reason == "stop"
+    assert message == {"role": "assistant", "content": text}
 
 
 @pytest.mark.asyncio

@@ -62,6 +62,16 @@ actor_rollout_ref:
     custom:
       agent_framework:
         gateway_count: 1
+        legacy_bash_tool_fallback: true
+        max_tokens_per_request: 4096
+        apply_chat_template_kwargs:
+          enable_thinking: false
+        specrl:
+          enabled: false
+          bias: 0.5
+          seed: 1234
+          cache_max_entries: 10000
+          cache_max_tokens: 10000000
         agent_runners:
           swe_agent:
             runner_fqn: examples.blackbox_recipes.mini_swe_agent.mini_swe_agent_runner.mini_swe_agent_runner

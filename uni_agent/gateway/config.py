@@ -21,6 +21,8 @@ class GatewayActorConfig:
         tokenizer: Tokenizer used by the message codec.
         processor: Optional multimodal processor used for vision requests.
         tool_parser_name: Optional VERL tool parser name for decoding tool calls.
+        legacy_bash_tool_fallback: Whether to convert complete ``<bash>`` blocks
+            into OpenAI-compatible calls when the configured parser finds none.
         apply_chat_template_kwargs: Default kwargs passed to chat-template rendering.
         base_sampling_params: Sampling params applied before per-request overrides.
         allowed_request_sampling_param_keys: Request sampling keys accepted by the
@@ -29,11 +31,14 @@ class GatewayActorConfig:
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt-token budget stored on gateway sessions.
         response_length: Optional response-token budget stored on gateway sessions.
+        max_model_len: Optional model context limit enforced against actual encoded tokens.
+        max_tokens_per_request: Optional hard cap applied to each backend generation.
     """
 
     tokenizer: Any
     processor: Any | None = None
     tool_parser_name: str | None = None
+    legacy_bash_tool_fallback: bool = False
     apply_chat_template_kwargs: dict[str, Any] | None = None
     base_sampling_params: dict[str, Any] | None = None
     allowed_request_sampling_param_keys: frozenset[str] | None = None
@@ -41,3 +46,5 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
+    max_model_len: int | None = None
+    max_tokens_per_request: int | None = None

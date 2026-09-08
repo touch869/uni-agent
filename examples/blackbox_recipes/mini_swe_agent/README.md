@@ -121,3 +121,27 @@ agent_runner_fqn: examples.blackbox_recipes.mini_swe_agent.mini_swe_agent_runner
 | `SWE_AGENT_RUN_TIMEOUT` | `7200` | Max wall time for the agent process in the sandbox |
 | `SWE_AGENT_TOOL_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest` | Sidecar tool image |
 | `CONDA_ENV` | `testbed` | Conda env activated inside the sandbox before running the agent |
+
+## 4. Extract Benchmark Logs
+
+Use `extract_specrl_logs.py` to turn a completed paired benchmark into
+analysis-ready JSON, CSV, and Markdown summaries. The input may be either the
+benchmark directory or a ZIP archive containing it.
+
+```bash
+python examples/blackbox_recipes/mini_swe_agent/extract_specrl_logs.py \
+  outputs/specrl_benchmark/specrl_controlled_20260807_063149
+
+python examples/blackbox_recipes/mini_swe_agent/extract_specrl_logs.py \
+  /data1/zpy/workspace/log.zip \
+  --output-dir /data1/zpy/workspace/log_analysis
+```
+
+The tool creates one subdirectory per experiment beneath the output root. For
+example, the command above writes to
+`/data1/zpy/workspace/log_analysis/specrl_controlled_20260807_063149/`.
+Directory inputs default to `<benchmark>/log_analysis/<benchmark-name>/`; ZIP
+inputs default to `<archive_stem>_analysis/<benchmark-name>/`. Each run writes
+`experiment_summary.json`, `trials.csv`, `pairs.csv`, and
+`experiment_summary.md`. Use `--warmup-steps N` when the source does not have a
+`summary.json` containing the benchmark warmup count.

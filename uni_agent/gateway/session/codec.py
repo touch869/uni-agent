@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -26,6 +27,8 @@ _DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS = frozenset(
         "max_tokens",
     }
 )
+
+_LEGACY_BASH_TOOL_CALL_RE = re.compile(r"<bash>\s*(.*?)\s*</bash>", re.DOTALL | re.IGNORECASE)
 
 
 # Map backend stop_reason values to OpenAI-spec finish_reason values.
@@ -142,6 +145,7 @@ class MessageCodec:
         vision_info_extractor=None,
         vision_info_extractor_kwargs: dict[str, Any] | None = None,
         tool_parser_name: str | None = None,
+        legacy_bash_tool_fallback: bool = False,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
         base_sampling_params: dict[str, Any] | None = None,
         allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None,
@@ -162,6 +166,41 @@ class MessageCodec:
             **self._apply_chat_template_kwargs,
         )
         self._tool_parser = ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
+        self._legacy_bash_tool_fallback = legacy_bash_tool_fallback
+
+    @staticmethod
+    def _has_named_tool(tools: list[dict[str, Any]], name: str) -> bool:
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            if isinstance(function, dict) and function.get("name") == name:
+                return True
+        return False
+
+    def _decode_legacy_bash_tool_calls(
+        self,
+        response_text: str,
+        tools: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        if not self._legacy_bash_tool_fallback or not self._has_named_tool(tools, "bash"):
+            return response_text, []
+
+        matches = list(_LEGACY_BASH_TOOL_CALL_RE.finditer(response_text))
+        commands = [match.group(1).strip() for match in matches if match.group(1).strip()]
+        if not commands:
+            return response_text, []
+
+        content = _LEGACY_BASH_TOOL_CALL_RE.sub("", response_text).strip()
+        tool_calls = [
+            {
+                "id": f"call_{uuid4().hex[:8]}",
+                "type": "function",
+                "function": {"name": "bash", "arguments": {"command": command}},
+            }
+            for command in commands
+        ]
+        return content, tool_calls
 
     async def _default_vision_info_extractor(
         self,
@@ -303,6 +342,7 @@ class MessageCodec:
         stop_reason: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an assistant message and finish reason."""
+        response_text: str | None = None
         if self._tool_parser is not None and tools:
             parsed_tools = None
             try:
@@ -327,7 +367,13 @@ class MessageCodec:
                     "tool_calls": tool_calls,
                 }
                 return message, "tool_calls"
-        response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
+            response_text = content
+        if response_text is None:
+            response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
+        if tools:
+            content, tool_calls = self._decode_legacy_bash_tool_calls(response_text, tools)
+            if tool_calls:
+                return {"role": "assistant", "content": content, "tool_calls": tool_calls}, "tool_calls"
         finish_reason = _FINISH_REASON_MAP.get(stop_reason, stop_reason) if stop_reason else "stop"
         return {"role": "assistant", "content": response_text}, finish_reason
 
