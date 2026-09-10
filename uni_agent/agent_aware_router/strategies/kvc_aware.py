@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..config.strategy import KVCAwareStrategyConfig
 from ..debug import get_debug_var, is_debug_enabled
@@ -411,7 +411,7 @@ class KVCacheAwareStrategy:
             inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
             inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
             s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
-            avail = cap * (1.0 - kv_perc)
+            avail = cap - inflight_tokens * kv_perc
             need = plen * (1.0 - gpu_hit)
             remaining = avail - need
             # Emit as fractions of capacity (default-bucket friendly); skip when cap unknown.
@@ -439,17 +439,13 @@ class KVCacheAwareStrategy:
             )
 
         thresh = cap * (1.0 - self.load_threshold)
-        cold_start = store.get_sticky_binding(request_id) is None
-        if cold_start:
-            top = min(range(n), key=lambda i: rows[i]["inflight_tokens"])
-            logger.info("score(): CAPACITY_TOKEN_AWARE cold start → min inflight_tokens")
+
+        eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
+        if not eligible:
+            top = max(range(n), key=lambda i: rows[i]["remaining"])
+            logger.info("score(): CAPACITY_TOKEN_AWARE no eligible → max remaining")
         else:
-            eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
-            if not eligible:
-                top = max(range(n), key=lambda i: rows[i]["remaining"])
-                logger.info("score(): CAPACITY_TOKEN_AWARE no eligible → max remaining")
-            else:
-                top = max(eligible, key=lambda i: rows[i]["remaining"])
+            top = max(eligible, key=lambda i: rows[i]["remaining"])
 
         for i, row in enumerate(rows):
             tag = " ← WINNER" if i == top else ""
