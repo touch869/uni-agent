@@ -39,8 +39,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..types.emit_spec import EMIT_SPECS, EmitKey
 from ...rl_insight import metric_count, metric_gauge, metric_histogram
+from ..types.emit_spec import EMIT_SPECS, EmitKey
 
 __all__ = ["Emitter", "WriteEvent", "WriteKind", "emitter"]
 

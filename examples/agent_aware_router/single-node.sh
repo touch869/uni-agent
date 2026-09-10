@@ -32,6 +32,9 @@ MAX_SAMPLES="${MAX_SAMPLES:-64}"
 RES_LEN="${RES_LEN:-8000}"
 N="${N:-8}"
 
+echo "please set right TOOL_PARSER for you model. Reference https://github.com/verl-project/verl/blob/main/verl/experimental/agent_loop/tool_parser.py"
+TOOL_PARSER="${TOOL_PARSER:-hermes}"
+
 # OpenYuanrong sandbox creds (only reverse-tunnel provider).
 : "${OPENYUANRONG_SERVER_ADDRESS:?Set OPENYUANRONG_SERVER_ADDRESS}"
 : "${OPENYUANRONG_TOKEN:?Set OPENYUANRONG_TOKEN}"
@@ -89,6 +92,7 @@ run_experiment() {
             --shuffle \
             --concurrency "$CONCURRENCY" \
             --kv-events \
+            --tool-parser "$TOOL_PARSER" \
             "$@" > "$log_file" 2>&1
     done
 }

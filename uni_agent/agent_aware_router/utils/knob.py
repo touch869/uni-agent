@@ -53,7 +53,9 @@ def coerce_knob_value(name: str, raw: Any, default: Any) -> Any:
         try:
             return type(default)(raw)
         except ValueError as exc:
-            raise ConfigError(f"router knob '{name}' expects one of {[m.value for m in type(default)]}, got {raw!r}") from exc
+            raise ConfigError(
+                f"router knob '{name}' expects one of {[m.value for m in type(default)]}, got {raw!r}"
+            ) from exc
 
     if isinstance(default, dict):
         try:
@@ -67,7 +69,9 @@ def coerce_knob_value(name: str, raw: Any, default: Any) -> Any:
             try:
                 parsed = {key_type(k): v for k, v in parsed.items()}
             except ValueError as exc:
-                raise ConfigError(f"router knob '{name}' keys must be in {[m.value for m in key_type]}, got {set(parsed)}") from exc
+                raise ConfigError(
+                    f"router knob '{name}' keys must be in {[m.value for m in key_type]}, got {set(parsed)}"
+                ) from exc
         return parsed
 
     try:

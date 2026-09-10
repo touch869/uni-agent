@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..config.strategy import KVCAwareStrategyConfig
 from ..debug import get_debug_var, is_debug_enabled

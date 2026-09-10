@@ -28,8 +28,8 @@ from ..debug import get_debug_var, is_debug_enabled
 from ..insight import WriteEvent, WriteKind, emitter
 from ..logging import get_router_logger
 from ..store.data_store import DataStore
-from ..utils.knob import coerce_knob_value
 from ..types import EmitKey, MetricKey
+from ..utils.knob import coerce_knob_value
 from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .transport.base import Transport
 
@@ -256,13 +256,13 @@ class Collector:
             return
         snapshots = self._data_store.refresh_metrics({update.node_id: update.metrics})
         emitter.on_write(
-                WriteEvent(
-                    kind=WriteKind.POLL,
-                    node=update.node_id,
-                    new_values=snapshots.get(update.node_id, {}),
-                    load=self._data_store.kv_cache_load(update.node_id),
-                )
+            WriteEvent(
+                kind=WriteKind.POLL,
+                node=update.node_id,
+                new_values=snapshots.get(update.node_id, {}),
+                load=self._data_store.kv_cache_load(update.node_id),
             )
+        )
 
         # Periodic visibility into what the collector fed the router — compare
         # against vllm's own "GPU KV cache usage" engine-stats log line.

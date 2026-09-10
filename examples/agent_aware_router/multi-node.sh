@@ -281,10 +281,6 @@ step3_matrix() {
         for CONTEXT in "${contexts[@]}"; do
             local EXP_ID="infer-sticky-prompt${MAX_SAMPLES}x${N}-${CONCURRENCY}x${CONTEXT}-n${NNODES}"
             local LOG_FILE="${EXP_ID}.log"
-            export SWE_AGENT_TRAJECTORY_DIR="${ARCHIVE_ROOT}/${EXP_ID}/trajectories"
-            export UNI_AGENT_GATEWAY_REJECTED_DIR="${ARCHIVE_ROOT}/${EXP_ID}/rejected_requests"
-            mkdir -p "${SWE_AGENT_TRAJECTORY_DIR}" "${UNI_AGENT_GATEWAY_REJECTED_DIR}"
-            export SWE_AGENT_DUMP_TRAJECTORIES="${EXP_ID}.traj"
             log "sticky concurrency=${CONCURRENCY} context=${CONTEXT} (traj -> ${ARCHIVE_ROOT}/${EXP_ID}/trajectories)"
             (
                 export UNI_AGENT_ROUTER_DEBUG=1
@@ -298,10 +294,6 @@ step3_matrix() {
             for lt in "${lts[@]}"; do
                 local EXP_ID="infer-kvcaware-lt${lt}-prompt${MAX_SAMPLES}x${N}-${CONCURRENCY}x${CONTEXT}-n${NNODES}"
                 local LOG_FILE="${EXP_ID}.log"
-                export SWE_AGENT_TRAJECTORY_DIR="${ARCHIVE_ROOT}/${EXP_ID}/trajectories"
-                export UNI_AGENT_GATEWAY_REJECTED_DIR="${ARCHIVE_ROOT}/${EXP_ID}/rejected_requests"
-                mkdir -p "${SWE_AGENT_TRAJECTORY_DIR}" "${UNI_AGENT_GATEWAY_REJECTED_DIR}"
-                export SWE_AGENT_DUMP_TRAJECTORIES="${EXP_ID}.traj"
                 log "kvcaware-lt${lt} concurrency=${CONCURRENCY} context=${CONTEXT} (traj -> ${ARCHIVE_ROOT}/${EXP_ID}/trajectories)"
                 run_experiment "${LOG_FILE}" \
                     --load-threshold "${lt}"

@@ -27,14 +27,13 @@ from typing import Any
 
 import pytest
 
-from uni_agent.agent_aware_router.insight.emitter import emitter
+from uni_agent import rl_insight as facade
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
 from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
 from uni_agent.agent_aware_router.types import MetricKey, SlowCut
-from uni_agent import rl_insight as facade
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 

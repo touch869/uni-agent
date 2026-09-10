@@ -64,11 +64,13 @@ def _get_rl_insight() -> Any | None:
         return None
     try:
         import rl_insight
+
         rl_insight.init()
     except Exception as exc:  # noqa: BLE001 - telemetry must not break its host
         _dead = True
-        logger.warning("rl-insight wiring failed (%s: %s); metric emit disabled for this process",
-                       type(exc).__name__, exc)
+        logger.warning(
+            "rl-insight wiring failed (%s: %s); metric emit disabled for this process", type(exc).__name__, exc
+        )
         return None
     return rl_insight
 

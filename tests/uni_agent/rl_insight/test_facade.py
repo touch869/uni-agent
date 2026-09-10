@@ -23,6 +23,7 @@ wiring error degrades to permanently-off instead of breaking the caller).
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 
@@ -44,25 +45,26 @@ def test_disabled_metric_short_circuits_before_import(monkeypatch: pytest.Monkey
     facade.metric_histogram("x", 3)
 
 
-def test_wiring_failure_isolates_callers(monkeypatch: pytest.MonkeyPatch):
+def test_wiring_failure_isolates_callers(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
     """init() raising must not propagate; the failure is warned once; later emits stay silent no-ops."""
     monkeypatch.setenv(facade.ENABLE_ENV, "1")
     monkeypatch.setattr(facade, "_enabled", None)
     monkeypatch.setattr(facade, "_dead", False)
 
     calls = []
-    warnings = []
-    monkeypatch.setattr(facade, "_warn", lambda msg: warnings.append(msg))
     boom = types.SimpleNamespace(
         init=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("backend down")),
         metric_count=lambda *a, **k: calls.append("count"),
     )
     monkeypatch.setitem(sys.modules, "rl_insight", boom)
 
-    assert facade._get_rl_insight() is None  # first call: warned, None
-    facade.metric_count("x", 1)  # degraded: silent no-op, no re-init
-    assert len(warnings) == 1
-    assert "rl-insight wiring failed" in warnings[0]
+    with caplog.at_level(logging.WARNING, logger=facade.__name__):
+        assert facade._get_rl_insight() is None  # first call: warned, None
+        facade.metric_count("x", 1)  # degraded: silent no-op, no re-init
+    wiring_warnings = [r.getMessage() for r in caplog.records if "rl-insight wiring failed" in r.getMessage()]
+    assert wiring_warnings == [
+        "rl-insight wiring failed (RuntimeError: backend down); metric emit disabled for this process"
+    ]
     assert calls == []
 
 

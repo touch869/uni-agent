@@ -176,7 +176,8 @@ EMIT_SPECS: dict[str, dict[str, Any]] = {
     EmitKey.NEED_RATIO: {
         "type": "histogram",
         "labels": ["replica"],
-        "help": "Prefill this request adds as a fraction of capacity = plen * (1 - gpu_hit) / cap (may exceed 1 for oversized prompts)",
+        "help": "Prefill this request adds as a fraction of capacity = plen * (1 - gpu_hit) / cap"
+        "(may exceed 1 for oversized prompts)",
     },
     EmitKey.REMAINING_RATIO: {
         "type": "histogram",

@@ -27,13 +27,13 @@ from typing import Any
 
 import pytest
 
+from uni_agent import rl_insight as facade
 from uni_agent.agent_aware_router.insight.emitter import (
     WriteEvent,
     WriteKind,
     emitter,
 )
 from uni_agent.agent_aware_router.types.emit_spec import EMIT_SPECS, EmitKey
-from uni_agent import rl_insight as facade
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
