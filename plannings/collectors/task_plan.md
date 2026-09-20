@@ -6,6 +6,19 @@ Incrementally implement the approved collectors event-pubsub design while preser
 
 ## Current Phase
 
+None — all phases complete.
+
+## Completed Phases
+
+### Phase 7: Router Inflight Ownership Migration
+
+- [x] Audit the inflight input family (`InflightParser` → delta `MetricsUpdate` → `Collector._write_metrics_update`) against the frozen single-writer contract
+- [x] Add a `RouterInflightStateProjector` with legacy/shadow/projector ownership over the inflight delta family, sharing the exact commit semantics (per-request folding, batched incr, insight WriteEvents, throttled dispatch logs)
+- [x] Wire inflight handler/observer through the existing `get_collector` seam; remove the Collector compatibility writer in projector mode
+- [x] Extend fail-closed acquire checks and `get_router_state_status()` to the inflight projector
+- [x] Verify shadow parity, projector single-writer, fail-closed behavior, legacy default compatibility, Phase 1-6 regressions, static checks, and the legacy hot-path benchmark
+- **Status:** complete
+
 ### Phase 6: Trainer Metrics Consumption and Export
 
 - [x] Audit the prompt-summary handoff, trainer consumption, formatter, and tracking ownership
@@ -14,8 +27,6 @@ Incrementally implement the approved collectors event-pubsub design while preser
 - [x] Preserve disabled-path behavior and ensure exactly one exporter owns each production metric
 - [x] Verify compatibility, boundedness, end-to-end delivery, formatting, lint, compile, and performance
 - **Status:** complete
-
-## Completed Phases
 
 ### Phase 5: Final Migration and Cleanup
 
@@ -114,6 +125,14 @@ Incrementally implement the approved collectors event-pubsub design while preser
 - Each exported metric has one configured owner; shadow validation cannot duplicate production tracking output.
 - `collectors.task_metrics.mode=off` preserves the existing TransferQueue payload and trainer behavior exactly.
 - Focused end-to-end, compatibility, failure, formatting, lint, compile, diff, and performance checks pass, subject only to recorded baseline dependency blockers.
+
+## Phase 7 Exit Criteria
+
+- Router mode stays explicit: legacy allocates no inflight projection runtime; shadow never writes Router store inflight state; projector is the only writer of the inflight delta family after cutover.
+- Acquire/release turn and prompt-length folding, insight WriteEvents, and throttled dispatch logs remain identical regardless of which owner commits the family.
+- A projector commit failure marks the inflight view unhealthy and blocks later route expansion, while observation failures stay non-blocking and visible.
+- Existing Sticky, KV, polled-metrics, Direct, Global, and admission ownership remains unchanged; the Balancer's command-side `_inflight` ledger stays the capacity-fact source.
+- Focused Phase 7 tests, cross-phase regression, formatting, lint, compile, diff, and performance checks pass, subject only to recorded baseline dependency blockers.
 
 ## Guardrails
 

@@ -213,3 +213,27 @@
 - Current production Gateway projector metrics all use `AggregationType.SUM`, so the initial end-to-end slice remains complete while preserving a clear extension point for a future weighted trainer contract.
 - After trainer-safe key validation, the production-shaped reducer measured 71.766-75.029 us median and 208.050-250.928 us P99 across three isolated 20k-sample batches.
 - Final scope review confirms Phase 6 changes only the prompt DTO boundary, Framework terminal-tag ownership, trainer-side metrics adapters, focused tests, documentation, and `plannings/collectors/`; the dirty `verl`, `.planning/`, and `working/` state remains untouched.
+
+## 2026-09-20 — Phase 7 Recovery
+
+- The formal design's remaining implementation gaps after Phase 6 are: Router migration for the inflight and KV/polled-metrics input families (design 7.2 / delivery step 3), and admission enforce (design 8.3-8.5), which is explicitly gated behind the separate capacity-admission acceptance threshold and must not start from this plan.
+- The inflight input family is the `inflight_stat` collector: Balancer `on_acquire`/`on_release` callbacks → `CallbackTransport` `StatisticEvent` → `InflightParser` delta `MetricsUpdate` → `Collector._write_metrics_update` commits to the store.
+- `Collector._write_metrics_update` is the family's legacy writer and does more than a store write: it folds per-request turn and prompt-length rows into the same batched `incr_metrics`, forwards insight `WriteEvent`s (ACQUIRE/RELEASE kinds), and triggers the throttled `router-dispatch` log line.
+- The store behind both the Balancer's and the Collector's `DataStore` wrappers consists of process-wide singletons (`PerReplicaStore`/`KVCacheStore`/`PerRequestStore`), so projector parity checks can compare across the two wrappers; tests must reset the singletons per case (Phase 4 test convention).
+- The Balancer's `_inflight` dict is command-path state updated synchronously inside `acquire_server()`/`release_server()`; it is not a callback input family and remains the capacity-fact source for `REPLICA_CAPACITY_CHANGED` payloads.
+- Release-side `INFLIGHT_TOKENS` and `INFLIGHT_TURN_SUM` deltas are folded from acquire-time per-request rows because verl #7115 releases carry only `request_id`; the rows persist after release, so a post-commit observer can recompute the folded deltas read-only for parity.
+- `MetricsUpdate` also serves absolute polled updates from the `vllm_metrics` collector; only the `inflight_stat` collector may receive an inflight handler/observer, and the dispatch guard should keep absolute updates on the legacy write path.
+- Phase 4's sticky wiring precedent: `get_collector` reads `_router_sticky_update_handler`/`_observer` attributes off the Balancer, the Collector dispatches handler-before-observer, and the handler's presence removes the Collector's own write for that family in the same slice.
+- `test_legacy_mode_allocates_no_router_projection_runtime` asserts the exact legacy `get_router_state_status()` dict; adding an inflight status key requires updating that Phase 4 assertion.
+- `COLLECTOR_NAMES` includes `inflight_stat`, so the inflight collector runs in every Balancer construction; legacy mode must keep constructing it with unchanged behavior.
+
+## 2026-09-20 — Phase 7 Implementation
+
+- The inflight family's commit semantics live in one shared `commit_inflight_delta(store, update)` (fold → batched `incr_metrics` → insight `WriteEvent`); both the legacy Collector delta branch and `RouterInflightStateProjector.apply` call it, so owner cutover cannot change store state, telemetry output, or log cadence.
+- The throttled `router-dispatch` line is likewise shared (`log_dispatch_stats(store, last_log) -> float`); each owner keeps its own throttle timestamp, which preserves the ≥5 s cadence per owner instead of per process.
+- Per-request row keys are shared constants (`TURN_ROW_KEY`, `PROMPT_LEN_ROW_KEY`); the projector's comparison fold reads the same rows post-commit (release never deletes them), so effective-delta reconstruction is exact rather than approximated.
+- Parity in projector mode is tautological after the projector's own commit and only fires when another writer touches the family — mirroring the sticky projector, which also checks parity in both modes.
+- The dispatch guard `result.is_delta and handler is not None` keeps absolute polled `MetricsUpdate`s on the legacy write path even if a handler were mis-wired to a polling collector.
+- The Balancer fail-closed check generalized to `_unhealthy_router_projector()` iterates sticky then inflight and only acts in projector mode; the legacy hot path keeps a single mode comparison, and the paired benchmark shows no repeatable legacy regression.
+- The correct local test environment is the `py311` conda env (`/home/hgq/software/miniconda3/envs/py311`, Python 3.11.14 with `pytest-asyncio`); `agentic-py31114` lacks `pytest-asyncio` and fails async collection in events/Gateway suites on clean HEAD too.
+- Pre-existing-failure triage by stashing the working tree and rerunning the identical command on clean HEAD cleanly separated environment defects from Phase 7 regressions before any fix was attempted.

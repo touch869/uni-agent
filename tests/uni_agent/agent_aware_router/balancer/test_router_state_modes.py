@@ -64,12 +64,14 @@ def test_legacy_mode_allocates_no_router_projection_runtime():
         "mode": "legacy",
         "enabled": False,
         "sticky": {"commit_owner": "legacy"},
+        "inflight": {"commit_owner": "legacy"},
         "admission": {"enabled": False},
         "observation_failures": 0,
     }
     assert balancer._router_event_bus is None
     assert balancer._router_event_publisher is None
     assert balancer._router_sticky_projector is None
+    assert balancer._router_inflight_projector is None
     assert balancer._capacity_versions == {}
     assert balancer._replica_epochs == {}
 

@@ -362,3 +362,55 @@
 | The first trainer-safe metric-key patch missed a formatter-adjusted context block | Re-read only the reducer and focused test sections; the failed patch made no partial changes |
 | Ruff was accidentally pointed at `gateway-and-trajectories.md`, producing irrelevant Python parse errors | Rerun Ruff only on Phase 6 Python paths and validate the documentation separately |
 | The trainer-safe reducer rewrite needed repository formatting | Format only `uni_agent/metrics/trainer.py` and rerun the focused checks |
+
+## 2026-09-20 — Phase 7
+
+### Status
+
+- Phase: Router Inflight Ownership Migration
+- State: complete
+
+### Actions
+
+- Recovered the user-selected `plannings/collectors/` plan; `check-complete.sh` from inside the legacy plan root confirmed all seven phases (0-6) complete before continuation.
+- Selected the Phase 7 slice from the formal design's remaining gaps: admission enforce is gated behind the separate capacity-admission threshold (design 8.5), so the next design-faithful slice is completing Router migration for the inflight input family.
+- Audited the inflight write path: Balancer callbacks → `CallbackTransport` → `InflightParser` delta `MetricsUpdate` → `Collector._write_metrics_update` (per-request turn/prompt-length folding, batched `incr_metrics`, insight WriteEvents, throttled dispatch logs).
+- Confirmed the store backing is process-wide singletons, so the Balancer-owned `DataStore` and the Collector-owned `DataStore` observe the same state — the same property the sticky parity check relies on.
+- Confirmed the Balancer's `_inflight` command-side ledger is direct command-path state, not a callback input; it stays untouched as the capacity-fact source.
+- Froze the Phase 7 exit criteria: single-writer cutover for the inflight delta family, identical commit semantics regardless of owner, fail-closed projector health, and unchanged Sticky/KV/polled/Direct/Global/admission ownership.
+- Extracted the delta-commit core from `Collector._write_metrics_update` into the shared `commit_inflight_delta()` and the throttled `router-dispatch` line into `log_dispatch_stats()`, so the legacy Collector writer and the projector produce identical store state, insight WriteEvents, and log cadence.
+- Promoted the per-request row keys to shared `TURN_ROW_KEY`/`PROMPT_LEN_ROW_KEY` constants so the projector's read-only fold cannot drift from the commit fold.
+- Added `RouterInflightStateProjector`: projector mode commits through the shared function and owns the family's dispatch-log throttle; shadow mode reconstructs the effective deltas read-only from post-commit rows and compares a per-replica, fixed-key ledger against the store for parity in both modes.
+- Wired `inflight_update_handler`/`inflight_update_observer` through `Collector` and `get_collector("inflight_stat")` with an `is_delta` guard that keeps absolute polled updates on the legacy write path; the Collector's own delta write is bypassed exactly when the handler is present, matching the sticky precedent.
+- Extended `_unhealthy_router_projector()` so projector-mode failures of either the sticky or the inflight projector block route expansion before routing and after the acquire commit; `get_router_state_status()` exposes the inflight projector in every mode.
+- Added nine focused tests: legacy writer behavior, shadow parity and drift detection, shadow write prohibition, projector single-writer with folded deltas, commit-failure fail-closed, non-delta rejection, and Collector-level dispatch routing for delta and absolute updates.
+- Updated the Phase 4 legacy-runtime assertion for the added `inflight` status key; legacy mode still allocates no bus, publisher, projector, or observer.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Selected plan root | `plannings/collectors/` |
+| Phase 0-6 status before continuation | complete (7/7 per `check-complete.sh`) |
+| Unrelated worktree changes | `verl`, `.planning/`, `working/`; preserved |
+| Focused Phase 7 tests after formatting | 9 passed |
+| Phase 7 + router-state-modes + inflight + sticky suites | 22 passed; only the Ray deprecation warning |
+| Full router area `-m "cpu and level0"` (ray integration file ignored per recorded blocker) | 245 passed, 2 skipped, 11 deselected |
+| Cross-phase events, metrics, admission, Direct, Global suites | 73 passed |
+| Ruff check and format on changed files | passed after formatting `router_state.py` and the new test |
+| `compileall` over `agent_aware_router` | passed |
+| Paired legacy acquire/release benchmark (same host, 20k samples ×3 batches) | Phase 7 median 61.775-62.350 us versus clean parent 67.270-69.221 us; P99 197.477-213.418 us versus parent 175.216-191.348 us — median improved, tail inside this host's cross-run variance; absolute values remain far above the Phase 0 baseline host, consistent with the recorded Phase 2/4 variance findings |
+| Final scope audit | only Router inflight ownership files, focused tests, and `plannings/collectors/` changed; unrelated dirty state preserved |
+
+### Errors
+
+| Error | Resolution |
+|---|---|
+| `check-complete.sh` with `PWF_PLAN_ROOT` pinned to the custom plan root refused resolution | Reproduced the recorded behavior; run the check from inside the legacy plan directory without a pin, as previously established |
+| An early grep ran from `plannings/collectors` and warned the package path did not exist | Reissued from the repository root with absolute paths; no state was affected |
+| The first test run used the `agentic-py31114` conda env, which lacks `pytest-asyncio`, producing seven collection/async failures across events and Gateway Direct/Global suites | Verified the same seven failures reproduce identically on stashed clean HEAD, then switched to the `py311` env (Python 3.11.14 with `pytest-asyncio`); all 73 cross-phase tests pass there with Phase 7 applied |
+| `test_shadow_mode_reports_inflight_parity` asserted `INFLIGHT_TOKENS == 5` from a one-element prompt list (`prompt_len` is `len(prompt_ids)`) | Corrected the test data to a five-element prompt; production code was right |
+| The inflight projector's `_validate` ran outside the try block, so a rejected non-delta update raised without marking the projector unhealthy | Moved validation inside the try in both `apply` and `observe`, matching the sticky projector's fail-closed semantics |
+| Ruff reported one overlong line in the new projector code | Applied the repository formatter to the two affected files and reran lint, format, and the focused suites |
+| A sed-based row-key rename invalidated a pending in-context edit, which was then rejected atomically | Re-read the file and re-applied the same design against the current text |
+| Router ray-integration collection still fails on the export's missing `verl.workers.rollout.router` | Recorded Phase 2 baseline blocker; the dedicated Gateway-to-Ray Direct/Global integrations remain the cross-Actor evidence |

@@ -7,8 +7,15 @@ from collections import OrderedDict
 from enum import Enum
 from typing import Any
 
-from .collectors.parse import StickyUpdate
+from .collectors.collector import (
+    PROMPT_LEN_ROW_KEY,
+    TURN_ROW_KEY,
+    commit_inflight_delta,
+    log_dispatch_stats,
+)
+from .collectors.parse import MetricsUpdate, StickyUpdate
 from .store import DataStore
+from .types import MetricKey
 
 
 class RouterStateMode(str, Enum):
@@ -137,4 +144,132 @@ class RouterStickyStateProjector:
             )
 
 
-__all__ = ["RouterStateMode", "RouterStickyStateProjector"]
+class RouterInflightStateProjector:
+    """Own or shadow the inflight ``MetricsUpdate`` delta family with one commit owner.
+
+    The legacy writer is the ``inflight_stat`` Collector's
+    ``Collector._write_metrics_update`` delta branch; this projector owns the same
+    family in projector mode through the shared :func:`commit_inflight_delta`, so
+    the store state, insight ``WriteEvent`` stream, and throttled dispatch log
+    stay identical regardless of owner. The comparison view reduces the same
+    deltas read-only for parity — the family is bounded by replica count times a
+    fixed key set, so no eviction is needed (unlike sticky's LRU bindings).
+    """
+
+    _FAMILY_KEYS: tuple[str, ...] = (
+        MetricKey.INFLIGHT_COUNT,
+        MetricKey.INFLIGHT_TOKENS,
+        MetricKey.DISPATCHED_COUNT,
+        MetricKey.COMPLETED_COUNT,
+        MetricKey.PROMPT_LEN_SUM,
+        MetricKey.INFLIGHT_TURN_SUM,
+    )
+
+    def __init__(self, mode: RouterStateMode, store: DataStore) -> None:
+        if mode is RouterStateMode.LEGACY:
+            raise ValueError("legacy mode does not create a Router inflight Projector")
+        self._mode = mode
+        self._store = store
+        self._ledger: dict[str, dict[str, float]] = {}
+        self._lock = threading.RLock()
+        self._updates = 0
+        self._parity_mismatches = 0
+        self._last_error: str | None = None
+        self._dispatch_last_log = 0.0
+
+    @property
+    def healthy(self) -> bool:
+        with self._lock:
+            return self._last_error is None
+
+    def apply(self, update: MetricsUpdate) -> None:
+        """Commit one inflight delta update when the Projector owns this family."""
+        try:
+            self._validate(update)
+            commit_inflight_delta(self._store, update)
+            with self._lock:
+                self._accumulate(update, effective=self._effective_deltas(update))
+                self._updates += 1
+                self._check_parity(update.node_id)
+            self._dispatch_last_log = log_dispatch_stats(self._store, self._dispatch_last_log)
+        except Exception as exc:
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+            raise
+
+    def observe(self, update: MetricsUpdate) -> None:
+        """Reduce comparison state after the legacy writer has committed."""
+        try:
+            self._validate(update)
+            with self._lock:
+                self._accumulate(update, effective=self._effective_deltas(update))
+                self._updates += 1
+                self._check_parity(update.node_id)
+        except Exception as exc:
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+            raise
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "mode": self._mode.value,
+                "commit_owner": "projector" if self._mode is RouterStateMode.PROJECTOR else "legacy",
+                "healthy": self._last_error is None,
+                "last_error": self._last_error,
+                "updates": self._updates,
+                "parity_mismatches": self._parity_mismatches,
+                "tracked_replicas": len(self._ledger),
+                "replica_inflight": {
+                    node: values.get(MetricKey.INFLIGHT_COUNT, 0) for node, values in self._ledger.items()
+                },
+            }
+
+    @staticmethod
+    def _validate(update: MetricsUpdate) -> None:
+        if not update.is_delta:
+            raise ValueError("inflight projection requires a delta MetricsUpdate")
+        if not update.node_id:
+            raise ValueError("inflight delta requires node_id")
+
+    def _effective_deltas(self, update: MetricsUpdate) -> dict[str, float]:
+        """Fold per-request rows into the update's deltas.
+
+        ``commit_inflight_delta`` performs this fold while committing. This
+        read-only twin reconstructs the same effective deltas for the comparison
+        ledger and always runs after that commit landed: the acquire-side turn
+        row already includes the increment the commit applied, and release reads
+        rows that persist after the release write — release never deletes them,
+        so the post-commit read returns exactly what the commit subtracted.
+        """
+        effective = dict(update.metrics)
+        is_acquire = MetricKey.DISPATCHED_COUNT in effective
+        is_release = MetricKey.COMPLETED_COUNT in effective
+        if is_acquire and update.request_id is not None:
+            effective[MetricKey.INFLIGHT_TURN_SUM] = self._store.get_per_request(update.request_id, TURN_ROW_KEY, 0)
+        elif is_release and update.request_id is not None:
+            effective[MetricKey.INFLIGHT_TURN_SUM] = -self._store.get_per_request(update.request_id, TURN_ROW_KEY, 0)
+            effective[MetricKey.INFLIGHT_TOKENS] = -self._store.get_per_request(
+                update.request_id, PROMPT_LEN_ROW_KEY, 0
+            )
+        return effective
+
+    def _accumulate(self, update: MetricsUpdate, *, effective: dict[str, float]) -> None:
+        values = self._ledger.setdefault(update.node_id, {key: 0 for key in self._FAMILY_KEYS})
+        for key, delta in effective.items():
+            if key in values:
+                values[key] += delta
+
+    def _check_parity(self, node_id: str) -> None:
+        """Count every family key where the comparison ledger and store disagree.
+
+        Tautological after this projector's own commit unless another writer
+        touched the store — which is exactly the drift both modes must surface.
+        """
+        values = self._ledger.setdefault(node_id, {key: 0 for key in self._FAMILY_KEYS})
+        for key in self._FAMILY_KEYS:
+            if values.get(key, 0) != float(self._store.get_metric(node_id, key) or 0):
+                self._parity_mismatches += 1
+
+
+__all__ = ["RouterStateMode", "RouterStickyStateProjector", "RouterInflightStateProjector"]

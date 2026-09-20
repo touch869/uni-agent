@@ -48,7 +48,7 @@ from uni_agent.gateway.admission import AdmissionSignalsProjector
 
 from .collectors import CollectorManager
 from .config import KVCAwareConfig
-from .router_state import RouterStateMode, RouterStickyStateProjector
+from .router_state import RouterInflightStateProjector, RouterStateMode, RouterStickyStateProjector
 from .session_state import GatewaySessionStateProjector
 from .store import DataStore
 from .strategies import (
@@ -113,6 +113,9 @@ class KVCAwareBalancer:
         self._router_sticky_projector: RouterStickyStateProjector | None = None
         self._router_sticky_update_handler = None
         self._router_sticky_update_observer = None
+        self._router_inflight_projector: RouterInflightStateProjector | None = None
+        self._router_inflight_update_handler = None
+        self._router_inflight_update_observer = None
         self._router_event_bus: LocalEventBus | None = None
         self._router_event_publisher: EventPublisher | None = None
         self._admission_signals_projector: AdmissionSignalsProjector | None = None
@@ -134,6 +137,12 @@ class KVCAwareBalancer:
             self._router_sticky_update_observer = projector.observe
         else:
             self._router_sticky_update_handler = projector.apply
+        inflight = RouterInflightStateProjector(self._router_state_mode, self._store)
+        self._router_inflight_projector = inflight
+        if self._router_state_mode is RouterStateMode.SHADOW:
+            self._router_inflight_update_observer = inflight.observe
+        else:
+            self._router_inflight_update_handler = inflight.apply
 
         bus = LocalEventBus()
         admission = AdmissionSignalsProjector()
@@ -231,14 +240,17 @@ class KVCAwareBalancer:
                 "mode": RouterStateMode.LEGACY.value,
                 "enabled": False,
                 "sticky": {"commit_owner": "legacy"},
+                "inflight": {"commit_owner": "legacy"},
                 "admission": {"enabled": False},
                 "observation_failures": 0,
             }
         admission = self._admission_signals_projector
+        inflight = self._router_inflight_projector
         return {
             "mode": self._router_state_mode.value,
             "enabled": True,
             "sticky": self._router_sticky_projector.status(),
+            "inflight": inflight.status() if inflight is not None else {"commit_owner": "legacy"},
             "admission": admission.status() if admission is not None else {"enabled": False},
             "observation_failures": self._router_observation_failures,
         }
@@ -520,11 +532,30 @@ class KVCAwareBalancer:
         if released and self._router_event_publisher is not None:
             self._publish_capacity_change(server_id, reason="release")
 
+    def _unhealthy_router_projector(self, *, committing: bool) -> str | None:
+        """Name the first unhealthy projector that must block route expansion.
+
+        Only projector-mode failures fail closed: a shadow projector's state is
+        comparison-only and its faults must not change routing availability.
+        """
+        if self._router_state_mode is not RouterStateMode.PROJECTOR:
+            return None
+        projectors = (
+            ("sticky", self._router_sticky_projector),
+            ("inflight", self._router_inflight_projector),
+        )
+        for name, projector in projectors:
+            if projector is not None and not projector.healthy:
+                if committing:
+                    return f"Router {name} Projector failed while committing the route"
+                return f"Router {name} Projector is unhealthy"
+        return None
+
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Return the highest-ranked server id and handle."""
-        projector = self._router_sticky_projector
-        if projector is not None and self._router_state_mode is RouterStateMode.PROJECTOR and not projector.healthy:
-            raise RuntimeError("Router sticky Projector is unhealthy")
+        reason = self._unhealthy_router_projector(committing=False)
+        if reason is not None:
+            raise RuntimeError(reason)
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
         t0 = time.perf_counter()
@@ -543,8 +574,9 @@ class KVCAwareBalancer:
         server_id = ranking[0]
         self._inflight[server_id] = self._inflight.get(server_id, 0) + 1
         self._fire("on_acquire", request_id, server_id, prompt_ids)
-        if projector is not None and self._router_state_mode is RouterStateMode.PROJECTOR and not projector.healthy:
-            raise RuntimeError("Router sticky Projector failed while committing the route")
+        reason = self._unhealthy_router_projector(committing=True)
+        if reason is not None:
+            raise RuntimeError(reason)
         if self._router_event_publisher is not None:
             self._publish_capacity_change(server_id, reason="acquire", route_request_id=request_id)
         logger.debug(
