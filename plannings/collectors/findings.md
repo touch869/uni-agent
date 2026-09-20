@@ -185,3 +185,31 @@
 - veRL replay-buffer synchronization reads the existing `status` key and otherwise preserves or ignores additional tag metadata. The added `agent_metrics_summary` does not enter trajectory tensors or alter terminal-group state transitions.
 - The exact compatible Phase 0 suite completed faster after Phase 5 than in the pre-change run. Enabled prompt aggregation for four episodes with two metrics each measured 19.264-19.434 us median and 60.912-87.766 us P99 across isolated 20k-sample batches.
 - Phase 5 changes no Router, Direct, Global, or Admission hot path. Their focused recovery/isolation regression passed, and the previously recorded Phase 1-4 performance evidence remains applicable.
+
+## 2026-09-20 — Phase 6 Recovery
+
+- The formal design still names trainer consumption and end-to-end tracking coverage as follow-up work after Framework fragment merging.
+- Phase 5 stops at a versioned `agent_metrics_summary` stored in the prompt terminal TransferQueue tag; repository code outside Framework tests does not consume that field yet.
+- Phase 6 therefore targets the Framework-to-trainer handoff and export boundary, not a new Local, Direct, Global, Router, or Admission transport.
+- The smallest safe slice must keep `collectors.task_metrics.mode=off` byte-for-byte compatible and prevent `shadow` mode from becoming a second production exporter.
+- TransferQueue tags are the current prompt-level ownership boundary. The next audit must determine whether the pinned trainer retains terminal tag metadata or needs a narrow versioned adapter.
+- The pinned trainer's replay buffer reads all prompt tags but retains only `status` and `global_steps`; prompt-level metrics disappear before `KVBatchMeta` reaches metric computation.
+- The replay-buffer `sample()` result already includes an auxiliary metrics mapping that the trainer merges into its step metrics, so Phase 6 does not need to modify the trainer loop or tracking logger.
+- veRL exposes `trainer.v1.sampler.custom_sampler.{path,name}` as the supported extension seam. A uni-agent replay-buffer adapter can consume terminal prompt summaries without modifying the user-dirty `verl` submodule.
+- Sync and async replay buffers have different selection behavior, so a reusable reducer should remain independent while thin sync/async adapters preserve each upstream sampler implementation.
+- `PromptMetricsSummary` serializes a versioned bounded DTO but lacks a parser; Phase 6 needs a strict `from_dict()` boundary before trainer code can safely consume TransferQueue metadata.
+- Prompt summaries retain sufficient statistics for correct cross-prompt reduction: `MEAN` combines totals/counts, `SUM` totals, `MIN` minima, `MAX` maxima, and `LAST` follows deterministic selection order.
+- Trainer export must report coverage and incomplete/invalid summary counts separately. Missing metrics stay absent from the value reduction rather than contributing a fabricated zero.
+- The replay-buffer adapter is optional and must not be imported from `uni_agent.metrics.__init__`; the local CPU environment does not install TransferQueue, while production veRL does.
+- A sampler-side `primary` flag alone is insufficient to prove export ownership. Framework primary tags need an explicit trainer-owner marker so shadow summaries can never be exported accidentally.
+- The adapter's contract can be verified without mutating or installing into the dirty veRL submodule by loading it against a bounded fake of the documented replay-buffer seam.
+- Framework primary mode now places an explicit `trainer` owner marker next to the summary; shadow keeps the same summary for comparison but carries no export ownership.
+- Trainer reduction emits a stable set of summary counters, metric values under a separate namespace, and per-metric prompt/observation coverage. Aggregation conflicts omit the value and surface as both a bounded counter and an incomplete reason.
+- The public replay-buffer mixin lets deployments compose prompt export with an existing custom sampler instead of installing competing samplers.
+- Primary trainer reduction for four prompts with two metrics each measured 60.689-72.245 us median and 167.159-262.754 us P99 across three isolated 20k-sample batches. This runs once per sampled prompt group batch, not on event publication or request hot paths.
+- The adapter's `off` and `shadow` contract performs no extra TransferQueue metadata read; production export additionally requires the Framework's explicit `trainer` ownership marker.
+- veRL combines sampler metrics again across `parameter_sync_step` using metric-name aggregation rules and trajectory-count weighting. Returning generic flat values would silently distort prompt-level counts and `MEAN`/`LAST` semantics when the sync step contains multiple samples.
+- Phase 6 must encode `sum`, `min`, and `max` in tracking keys so the existing trainer preserves them. `MEAN` and `LAST` cannot be exact through this seam because it carries neither a custom weight nor a generic last rule; omit them with explicit unsupported counters/reasons instead of exporting a guessed value.
+- Current production Gateway projector metrics all use `AggregationType.SUM`, so the initial end-to-end slice remains complete while preserving a clear extension point for a future weighted trainer contract.
+- After trainer-safe key validation, the production-shaped reducer measured 71.766-75.029 us median and 208.050-250.928 us P99 across three isolated 20k-sample batches.
+- Final scope review confirms Phase 6 changes only the prompt DTO boundary, Framework terminal-tag ownership, trainer-side metrics adapters, focused tests, documentation, and `plannings/collectors/`; the dirty `verl`, `.planning/`, and `working/` state remains untouched.

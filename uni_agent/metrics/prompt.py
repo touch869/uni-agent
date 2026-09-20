@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 from .model import MetricsFragment, MetricSummary
+
+PROMPT_METRICS_SCHEMA_VERSION = 1
+PROMPT_METRICS_SUMMARY_FIELD = "agent_metrics_summary"
+PROMPT_METRICS_EXPORT_OWNER_FIELD = "agent_metrics_export_owner"
+TRAINER_METRICS_EXPORT_OWNER = "trainer"
 
 
 class EpisodeMetricsStatus(str, Enum):
@@ -41,7 +46,7 @@ class PromptMetricsSummary:
     complete: bool
     metrics: dict[str, MetricSummary]
     incomplete_reasons: tuple[str, ...] = ()
-    schema_version: int = 1
+    schema_version: int = PROMPT_METRICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         counts = (
@@ -72,6 +77,29 @@ class PromptMetricsSummary:
             "metrics": {name: summary.to_dict() for name, summary in self.metrics.items()},
             "incomplete_reasons": list(self.incomplete_reasons),
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PromptMetricsSummary:
+        raw_metrics = data.get("metrics")
+        if not isinstance(raw_metrics, Mapping):
+            raise TypeError("prompt metrics summary must contain a metrics mapping")
+        raw_incomplete_reasons = data.get("incomplete_reasons", ())
+        if not isinstance(raw_incomplete_reasons, list | tuple):
+            raise TypeError("prompt metrics incomplete_reasons must be a list or tuple")
+        complete = data.get("complete")
+        if not isinstance(complete, bool):
+            raise TypeError("prompt metrics complete must be a bool")
+        return cls(
+            schema_version=_required_int(data, "schema_version"),
+            episode_count=_required_int(data, "episode_count"),
+            successful_episodes=_required_int(data, "successful_episodes"),
+            empty_episodes=_required_int(data, "empty_episodes"),
+            failed_episodes=_required_int(data, "failed_episodes"),
+            fragment_count=_required_int(data, "fragment_count"),
+            complete=complete,
+            metrics={str(name): MetricSummary.from_dict(summary) for name, summary in raw_metrics.items()},
+            incomplete_reasons=tuple(str(reason) for reason in raw_incomplete_reasons),
+        )
 
 
 def aggregate_prompt_metrics(observations: Iterable[EpisodeMetricsObservation]) -> PromptMetricsSummary:
@@ -151,3 +179,10 @@ def aggregate_prompt_metrics(observations: Iterable[EpisodeMetricsObservation]) 
 def _append_reason(reasons: list[str], reason: str) -> None:
     if reason not in reasons:
         reasons.append(reason)
+
+
+def _required_int(data: Mapping[str, Any], name: str) -> int:
+    value = data[name]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"prompt metrics {name} must be an int")
+    return value

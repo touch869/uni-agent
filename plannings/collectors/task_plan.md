@@ -6,14 +6,23 @@ Incrementally implement the approved collectors event-pubsub design while preser
 
 ## Current Phase
 
+### Phase 6: Trainer Metrics Consumption and Export
+
+- [x] Audit the prompt-summary handoff, trainer consumption, formatter, and tracking ownership
+- [x] Define the smallest versioned consumption contract without coupling trainer code to event transports
+- [x] Implement one end-to-end vertical slice behind an explicit configuration gate
+- [x] Preserve disabled-path behavior and ensure exactly one exporter owns each production metric
+- [x] Verify compatibility, boundedness, end-to-end delivery, formatting, lint, compile, and performance
+- **Status:** complete
+
+## Completed Phases
+
 ### Phase 5: Final Migration and Cleanup
 
 - [x] Add prompt-level aggregation for empty and failed episodes
 - [x] Validate mixed-version behavior, failure recovery, and performance budgets
 - [x] Audit compatibility paths; retain those whose removal criteria are not met
 - **Status:** complete
-
-## Completed Phases
 
 ### Phase 4: Router and Admission Consumers
 
@@ -98,6 +107,14 @@ Incrementally implement the approved collectors event-pubsub design while preser
 - Compatibility adapters are removed only where focused parity tests prove all in-repository callers have migrated; externally meaningful public return contracts remain stable.
 - Focused compatibility, failure-recovery, cross-phase regression, performance, formatting, lint, compile, and diff checks pass, subject only to recorded baseline dependency blockers.
 
+## Phase 6 Exit Criteria
+
+- The Framework-to-trainer handoff carries a versioned prompt metrics summary without exposing Local, Direct, or Global transport internals.
+- Trainer-side consumption is bounded and idempotent, preserves explicit incomplete reasons, and does not interpret missing metrics as zero.
+- Each exported metric has one configured owner; shadow validation cannot duplicate production tracking output.
+- `collectors.task_metrics.mode=off` preserves the existing TransferQueue payload and trainer behavior exactly.
+- Focused end-to-end, compatibility, failure, formatting, lint, compile, diff, and performance checks pass, subject only to recorded baseline dependency blockers.
+
 ## Guardrails
 
 - Implement vertical slices; avoid broad package-by-package scaffolding.
@@ -132,3 +149,9 @@ Incrementally implement the approved collectors event-pubsub design while preser
 | One resumable test wait was submitted with malformed tool syntax | Reissued the wait against the same live session and retained the successful final result |
 | Phase 5 baseline collection could not import `verl.workers.rollout.replica` from the user-modified submodule | Preserve `verl` and rerun against the previously recorded read-only compatible veRL export |
 | Phase 5 compatibility baseline reproduced the known Loguru stdout-vs-`caplog` failure | Classify the exact node as an existing baseline defect and require the other 31 compatibility tests plus new Phase 5 coverage to pass |
+| Initial Phase 6 scoped lint found one import-order difference in `uni_agent/metrics/prompt.py` | Apply the scoped import organizer and rerun lint, format, and focused tests |
+| Phase 6 format check reported the two new trainer adapter files | Apply the repository formatter to those files before rerunning checks |
+| Importing the optional replay-buffer adapter failed because `transfer_queue` is not installed in the current CPU environment | Keep the adapter optional; test its contract with a bounded fake upstream module and retain a real-environment integration requirement |
+| Phase 6 Framework test collection hit the recorded missing `verl.workers.rollout.replica` module in the user-dirty submodule | Rerun the focused Framework coverage with the existing read-only compatible veRL export; do not modify `verl` |
+| The first trainer-safe key patch did not match the formatter-adjusted reducer block and was rejected atomically | Re-read the narrow reducer/test sections and apply the same design against the current formatted text |
+| A Phase 6 Ruff command accidentally included a Markdown document and produced irrelevant Python syntax errors | Restrict Ruff to Python files; validate the Markdown through diff/fence checks instead |

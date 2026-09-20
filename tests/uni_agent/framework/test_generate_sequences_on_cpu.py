@@ -1907,6 +1907,7 @@ async def test_prompt_metrics_summary_retains_fragment_when_postprocessing_drops
 
     summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
     assert fake_tq.puts[-1]["tag"]["status"] == "failure"
+    assert fake_tq.puts[-1]["tag"]["agent_metrics_export_owner"] == "trainer"
     assert summary["episode_count"] == 1
     assert summary["empty_episodes"] == 1
     assert summary["failed_episodes"] == 0
@@ -1937,6 +1938,24 @@ async def test_prompt_metrics_summary_retains_abort_fragment_for_failed_episode(
     assert summary["fragment_count"] == 1
     assert summary["complete"] is True
     assert len(runtime.aborted_sessions) == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_shadow_mode_does_not_claim_trainer_export(fake_tq):
+    runtime = _PerSessionMetricsGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="shadow",
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    terminal_tag = fake_tq.puts[-1]["tag"]
+    assert "agent_metrics_summary" in terminal_tag
+    assert "agent_metrics_export_owner" not in terminal_tag
 
 
 @pytest.mark.cpu

@@ -134,3 +134,11 @@ def test_prompt_summary_propagates_fragment_incompleteness():
     assert summary.metrics["gateway.request_s"].value == 10
     assert summary.incomplete_reasons == ("gateway-1:gateway:episode-1: request timing missing",)
     assert summary.to_dict()["failed_episodes"] == 0
+
+
+def test_prompt_summary_round_trips_through_versioned_dto():
+    summary = aggregate_prompt_metrics(
+        [EpisodeMetricsObservation("episode-1", EpisodeMetricsStatus.SUCCESS, (_fragment("episode-1", 10),))]
+    )
+
+    assert type(summary).from_dict(summary.to_dict()) == summary

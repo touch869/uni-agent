@@ -26,6 +26,9 @@ from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
 from uni_agent.metrics.model import MetricsFragment
 from uni_agent.metrics.prompt import (
+    PROMPT_METRICS_EXPORT_OWNER_FIELD,
+    PROMPT_METRICS_SUMMARY_FIELD,
+    TRAINER_METRICS_EXPORT_OWNER,
     EpisodeMetricsObservation,
     EpisodeMetricsStatus,
     aggregate_prompt_metrics,
@@ -46,7 +49,6 @@ logger = logging.getLogger(__name__)
 
 TrajectoryPostprocessor = Callable[..., list[Trajectory] | Awaitable[list[Trajectory]]]
 _AGENT_METRICS_FRAGMENT_FIELD = "agent_metrics_fragment"
-_AGENT_METRICS_SUMMARY_FIELD = "agent_metrics_summary"
 _EPISODE_METRICS_OBSERVATION_ATTR = "_uni_agent_metrics_observation"
 
 
@@ -376,6 +378,7 @@ class GatewayAgentFramework(AgentFramework):
         self._mask_unfinished_episode = mask_unfinished_episode
         if task_metrics_mode not in {"off", "shadow", "primary"}:
             raise ValueError(f"Unknown task metrics mode: {task_metrics_mode}")
+        self._task_metrics_mode = task_metrics_mode
         self._task_metrics_enabled = task_metrics_mode != "off"
         self._trajectory_postprocessor = trajectory_postprocessor
         self._trajectory_postprocessor_kwargs = trajectory_postprocessor_kwargs or {}
@@ -747,7 +750,9 @@ class GatewayAgentFramework(AgentFramework):
             terminal_tag = {"status": "failure"}
             failed_uids = 1
         if self._task_metrics_enabled:
-            terminal_tag[_AGENT_METRICS_SUMMARY_FIELD] = aggregate_prompt_metrics(metrics_observations).to_dict()
+            terminal_tag[PROMPT_METRICS_SUMMARY_FIELD] = aggregate_prompt_metrics(metrics_observations).to_dict()
+            if self._task_metrics_mode == "primary":
+                terminal_tag[PROMPT_METRICS_EXPORT_OWNER_FIELD] = TRAINER_METRICS_EXPORT_OWNER
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag=terminal_tag)
 
         return {

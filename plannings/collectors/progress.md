@@ -301,3 +301,64 @@
 | Compatibility test `test_generate_sequences_reports_unfinished_episode_count` saw the expected log on stdout but `caplog.text` was empty | Record as the existing stdout-vs-caplog baseline issue; production output contains the asserted values and no collector code is involved |
 | Initial 100k-event performance run exceeded both Phase 1 P99 budgets despite acceptable medians | Rerun multiple isolated batches as required by the baseline; optimize only if the result is repeatable |
 | Hot-path optimization left `uni_agent/events/model.py` outside formatter output | Format that file, then rerun lint/tests and the exact same benchmark shape |
+
+## 2026-09-20 — Phase 6
+
+### Status
+
+- Phase: Trainer Metrics Consumption and Export
+- State: complete
+
+### Actions
+
+- Recovered the user-selected `plannings/collectors/` plan and confirmed Phases 0-5 are complete.
+- Added Phase 6 according to the planning skill's continuation rule for a completed plan.
+- Chose the remaining formal-design gap as the Phase 6 vertical slice: consume the Phase 5 prompt summary at the trainer boundary and export it exactly once.
+- Confirmed the repository currently writes `agent_metrics_summary` only in Framework and has no downstream production consumer.
+- Audited the pinned replay buffer and trainer loop: prompt metadata is visible at sampling time, and auxiliary sampler metrics are already logged by the existing trainer path.
+- Selected the supported custom-sampler seam so Phase 6 can remain outside the dirty `verl` submodule.
+- Audited the Phase 5 summary DTO and identified the missing trainer-boundary parser and cross-prompt reduction contract.
+- Implemented the versioned prompt-summary parser, pure trainer reduction, optional sync/async replay-buffer adapters, and focused DTO/reduction tests.
+- Verified 12 focused metrics and adapter-contract tests; scoped lint passes after import organization, and repository formatting was applied only to the two new adapter files and their test.
+- Added explicit Framework export ownership: primary claims `trainer`, while shadow never claims or emits production tracking metrics.
+- Added stable summary counters, aggregation-conflict diagnostics, public sampler composition, and concise configuration documentation.
+- Verified all 13 metrics/replay-adapter tests and 5 focused Framework prompt-metrics tests after splitting the filtered invocations correctly.
+- Ran the compatible full metrics/Framework regression: 86 passed, with only the five previously recorded parameterized/log-capture baseline nodes deselected.
+- Ran the event, Direct, Global, Router ownership, Admission observation, and metrics cross-phase regression: 73 passed.
+- Benchmarked the primary trainer reducer across three isolated 20k-sample batches: median 60.689-72.245 us and P99 167.159-262.754 us for four prompts with two metrics each.
+- Audited veRL's second-stage `MetricsAggregator` and found that generic sampler metric names would corrupt prompt counts and `MEAN`/`LAST` semantics across `parameter_sync_step > 1`.
+- Tightened the export contract to trainer-safe `sum|min|max` keys; unsupported weighted/last reductions remain explicit rather than approximate.
+- Verified the final metrics/Framework compatibility suite: 87 passed, with only five recorded logging-capture parameterizations deselected.
+- Verified the final cross-phase event, Direct, Global, Router ownership, Admission observation, and metrics suite: 74 passed.
+- Re-ran the production-shaped reducer benchmark after trainer-safe key validation: median 71.766-75.029 us and P99 208.050-250.928 us across three isolated 20k-sample batches.
+- Completed final static and scope review; Phase 6 is ready for its own commit.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Selected plan root | `plannings/collectors/` |
+| Prompt DTO, trainer reduction, and replay adapter tests | 17 passed |
+| Focused Framework prompt-summary/owner tests | 5 passed; only the known Ray deprecation warning |
+| Compatible metrics and Framework regression | 87 passed, 5 recorded logging-capture parameterizations deselected |
+| Cross-phase event, Direct, Global, Router, Admission, and metrics regression | 74 passed; only the known Ray warning |
+| Optional replay-buffer dependency | real TransferQueue unavailable locally; adapter contract passed against the documented fake upstream seam |
+| Production-shaped trainer reducer benchmark | median 71.766-75.029 us; P99 208.050-250.928 us across three 20k-sample batches |
+| Ruff, format, compileall, Markdown fence, and diff checks | passed |
+| Unrelated worktree state | `verl`, `.planning/`, and `working/` preserved |
+
+### Errors
+
+| Error | Resolution |
+|---|---|
+| The first Phase 6 tail command ran from the repository root and used unqualified planning filenames | Reissued the read with explicit `plannings/collectors/` paths; no files were changed by the failed read |
+| Initial scoped lint found one import-order difference in `uni_agent/metrics/prompt.py` | Apply the repository import organizer only to the Phase 6 files and rerun the scoped checks |
+| Scoped format check reported the two new trainer adapter files | Format only those Phase 6 files and rerun the check |
+| Optional replay-buffer adapter import could not find `transfer_queue` in the current CPU environment | Do not add a mandatory dependency; exercise the adapter against a fake upstream contract and record real TransferQueue runtime coverage as unavailable locally |
+| The new replay-buffer adapter contract test needed repository formatting | Format that test only and rerun the focused suite and static checks |
+| Framework prompt-metrics collection hit the known missing `verl.workers.rollout.replica` module | Rerun against the existing compatible read-only veRL export while preserving the dirty submodule |
+| The owner-marker change left `uni_agent/metrics/trainer.py` outside formatter output | Format that Phase 6 file and rerun scoped checks |
+| A shared `-k prompt_metrics` filter deselected trainer-export and adapter tests in a combined invocation | Split metrics modules and Framework selection into separate pytest commands so every intended test runs |
+| The first trainer-safe metric-key patch missed a formatter-adjusted context block | Re-read only the reducer and focused test sections; the failed patch made no partial changes |
+| Ruff was accidentally pointed at `gateway-and-trajectories.md`, producing irrelevant Python parse errors | Rerun Ruff only on Phase 6 Python paths and validate the documentation separately |
+| The trainer-safe reducer rewrite needed repository formatting | Format only `uni_agent/metrics/trainer.py` and rerun the focused checks |
