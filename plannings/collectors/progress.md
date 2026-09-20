@@ -1,0 +1,245 @@
+# Collectors Implementation Progress
+
+## 2026-09-20 — Phase 4
+
+### Status
+
+- Phase: Router and Admission Consumers
+- State: complete
+
+### Actions
+
+- Recovered the user-selected `plannings/collectors/` plan and confirmed Phase 3 is complete.
+- Recorded the dirty worktree and preserved unrelated `verl`, `.planning/`, `working/`, and completed Phase 1-3 changes.
+- Started Phase 4 as an ownership-focused migration slice; implementation will follow the formal Router/admission contracts rather than add consumers package by package.
+- Froze the formal Phase 4 boundary: preserve Router input protocols and command APIs, migrate one typed input family at a time, and keep admission observe-only.
+- Selected sticky bindings as the first Router ownership slice; inflight and KV/metrics inputs remain on their existing writers.
+- Selected committed Router route/capacity facts as the admission observation slice; no Coordinator, Grant, Hold, or capacity mirror will be introduced.
+- Paused Phase 4 expansion at the user's request to create separate retrospective commits for completed Phases 1-3.
+- Audited the current branch, index, untracked files, and overlapping integration diffs; no collector commit or staged change existed.
+- Reconstructed each completed phase from `1fad722` in an isolated temporary worktree so shared Gateway/Framework files retained the correct historical boundary.
+- Created `3584d2d` (`feat(collectors): add local event metrics slice`) after 23 local tests, 17 focused integration tests, lint, format, compile, and diff checks passed.
+- Created `12474f6` (`feat(collectors): add direct router state sync`) after 37 local tests, 9 Direct/config tests, lint, format, compile, and diff checks passed.
+- Created `db2f758` (`feat(collectors): add global telemetry pipeline`) after 55 Global/Direct/local tests, 8 config/cleanup tests, lint, format, compile, and diff checks passed.
+- Fast-forwarded `collector` to the three commits and refreshed the index without changing worktree files; only Phase 4, planning logs, and explicitly excluded user changes remain uncommitted.
+- Removed the temporary worktree and helper branch after the phase commits were attached to `collector`; no temporary project files remain.
+- Resumed Phase 4 and audited the draft reducers against Collector callback composition, sticky control commands, Direct snapshot delivery, and bounded admission retention.
+- Added focused ownership and failure-isolation coverage for shadow writes, projector commit failure, and admission observer failure.
+- Verified the integrated Phase 4 slice together with the local event, metrics, Direct, Global, legacy Router, and callback paths.
+- Removed disabled-mode capacity metadata and empty observation calls from the legacy hot path after performance review; focused compatibility tests remained green.
+- Completed the final scope review: Phase 4 migrates only Sticky ownership, leaves Inflight/KV/Metrics writers unchanged, and adds no admission enforcement path.
+- Completed the final integration, formatting, lint, compile, and diff checks; Phase 4 is ready for its own commit.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Selected plan root | `plannings/collectors/` |
+| Phase 4 status | complete |
+| Unrelated worktree changes | present; preserved |
+| Phase 1 commit | `3584d2d` |
+| Phase 2 commit | `12474f6` |
+| Phase 3 commit | `db2f758` |
+| Focused Phase 4 Router/admission tests | 17 passed; only the Ray deprecation warning |
+| Final Phase 1-4 integration regression | 158 passed; only known Ray and pytest-mark warnings |
+| Focused tests after legacy fast-path cleanup | 61 passed; only the Ray deprecation warning |
+| Legacy Router microbenchmark | median 37.285-38.282 us; P99 108.214-116.544 us across three 20k samples, aligned with the Phase 3 parent's noisy 38.041-44.080 us median and 113.032-155.259 us P99 |
+| Final Ruff, format, compileall, and diff checks | passed |
+
+### Errors
+
+| Error | Resolution |
+|---|---|
+| The planning hook reported multiple automatic plans without `PLAN_ID` | Use the user-selected `plannings/collectors/` directory explicitly for this task; do not recover or modify another plan |
+| First post-test Router benchmark was distorted by the just-finished Ray workload | Reran isolated legacy batches, compared against the exact Phase 3 parent, then removed disabled-mode work and repeated the focused suite |
+| Initial Phase 4 static checks found import order and formatting differences in the new tests | Applied the repository formatter only to those tests and reran the full scoped static checks |
+
+## 2026-09-20 — Phase 3
+
+### Status
+
+- Phase: Global Telemetry
+- State: complete
+
+### Actions
+
+- Recovered the user-selected `plannings/collectors/` plan and confirmed Phase 2 is complete.
+- Recorded the dirty worktree and preserved unrelated `verl`, `.planning/`, `working/`, and completed Phase 1/2 changes.
+- Fixed Phase 3 scope to one default-off Global telemetry vertical slice; Router/Admission ownership migration remains deferred.
+- Read the formal Global deployment, lifecycle, batching, pending-call, endpoint, accepted-ACK, loss, and acceptance-test sections.
+- Audited existing event, metrics, RL-Insight, and Gateway files; no asynchronous Global Reporter abstraction currently exists.
+- Audited LocalEventBus, Gateway runtime construction, and Framework composition; the existing named `deliver()` and driver composition seams can host the Global slice without changing ordinary publish semantics.
+- Audited Direct bridge patterns and GatewayManager ownership. Phase 3 will use separate Global DTOs/queues while reusing only the injection and lifecycle seams.
+- Re-read Phase 0 Global/config/ownership contracts and identified atomic endpoint ingress as necessary to avoid partial-batch retry ambiguity.
+- Chose the Phase 3 vertical slice: existing Gateway lifecycle/generation facts → source forwarder → shared broker → isolated shadow event-count Reporter actor.
+- Added the Ray-agnostic Global transport core: versioned DTOs, source batching/retry, bounded broker fan-out, atomic subscriber ingress, named local delivery, Reporter isolation, deduplication, and health/loss counters.
+- Added six focused Global core tests covering DTOs, batching, stable-ID BUSY retry, non-blocking overflow, duplicate ingress, slow-subscriber isolation, non-republishing delivery, and Reporter failure isolation.
+- Added a driver-owned Global telemetry runtime with separate broker and shadow Reporter Ray actors, then wired the default-off Gateway source path and ordered shutdown through the existing composition seam.
+- Added Gateway-to-Ray Global integration coverage and strict configuration checks; the first focused combined run passed all 19 selected tests.
+- Reviewed the integrated slice and identified four contained hardening changes: run-aware dedup keys, local subscription startup validation, event-filter config preservation, and failure-safe runtime cleanup.
+- Applied the hardening changes and added targeted regression coverage for each; the expanded Global/config/cleanup selection passes 26 tests.
+- Replaced Global pump `ray.get` calls with ObjectRef future waits; the dedicated Ray integration now passes without the async-actor blocking warning.
+- Extended the Ray vertical slice through one real generation; `SessionOpened`, `GenerationFinished`, and `SessionClosed` all reach the isolated Reporter.
+- Added a combined Direct + Global Gateway test proving the two paths advance independently while sharing only the local publisher/bus.
+- Made the selected Global event family an explicit composition-owned tuple shared by the source, broker, and Reporter, with strict startup validation.
+- Completed the loss-accounting audit so broker and subscriber endpoint BUSY counters include pre-queue validation and size-budget rejections.
+- Completed final scope review: no Phase 3 changes were added to Router or Admission ownership, no production RL-Insight series were claimed, and unrelated dirty-worktree content remains untouched.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Selected plan root | `plannings/collectors/` |
+| Phase 3 status | complete |
+| Unrelated worktree changes | present; preserved |
+| Focused Global core/config/Ray integration | 19 passed, 63 deselected |
+| Expanded Global, runtime-config, and cleanup checks | 26 passed, 67 deselected |
+| Event, metrics, and Direct shadow regression | 45 passed |
+| Dedicated Gateway-to-Ray Global integration/config | 7 passed; only Ray deprecation/environment warnings |
+| Final Global core plus full Gateway event-family Ray slice | 16 passed; only Ray deprecation/environment warnings |
+| Gateway Global Ray suite including simultaneous Direct + Global | 8 passed; only Ray deprecation/environment warnings |
+| Final event, metrics, and Direct shadow regression | 46 passed |
+| Final Global config wiring selection | 7 passed, 63 deselected |
+| Final format, Ruff, compileall, and diff checks | passed |
+| Final Global core/Ray/config selection after event-family wiring | 27 passed, 60 deselected |
+| Final Global core after BUSY accounting audit | 10 passed |
+| Final Global, local metrics, Direct shadow, and Gateway Ray acceptance | 55 passed; only Ray deprecation/environment warnings |
+| Compatible Gateway Direct and Manager regression | 10 passed, 1 known veRL-dependent test deselected |
+| Framework regression | 68 passed, 2 known stdout-vs-caplog tests deselected |
+| Full Gateway actor regression | 66 passed; 6 known `merge_context_tokens` dependency failures and 2 known stdout-vs-caplog failures |
+| Global source enqueue benchmark with blocked remote target | median 4.156-5.973 us; P99 11.811-27.316 us across three 20k-event batches |
+
+### Errors
+
+| Error | Resolution |
+|---|---|
+| Initial scoped Ruff check found one import-order error in `uni_agent/events/__init__.py` | Reordered the new Global exports without changing behavior, then rerun scoped checks |
+| First Global core lint run found one 123-character test assertion | Split the assertion into named ACK construction and status verification |
+| First Global core format check requested formatting for the new transport module | Applied the repository formatter; no manual style-only rewrites |
+| Initial telemetry runtime lint found one overlong status assignment | Split the two actor status awaits into self-documenting statements |
+| First integrated Phase 3 lint found one Gateway import-order difference | Run the repository import organizer only on the affected Gateway module |
+| First combined Gateway Global/Direct run outlived the initial 30-second tool yield and its session handle was not retained | Waited for clean process exit, then rerun the same suite while retaining the session handle and final result |
+| Combined Gateway regression reported the already-recorded missing `ContinuousTokenBuilder.merge_context_tokens()` failure | Keep the veRL dependency defect separate; 17 compatible Global/Direct/Manager tests passed in that run |
+| Ray warned about `ray.get` from the Global source callback even though it ran in the communication thread | Wait on the ObjectRef's thread-safe future in both Global source and broker subscriber pumps; keep async actor event loops unblocked |
+| Full Framework file reproduced the two recorded stdout-vs-caplog failures | Reran with only those exact nodes deselected; all 68 compatible tests pass |
+| Full Gateway actor file reproduced six continuation failures from missing `merge_context_tokens()` and two stdout-vs-caplog failures | Classify all eight under the recorded dependency/logging baseline; the remaining 66 tests passed |
+| Global enqueue benchmark exposed an `IndexError` when non-draining close cleared a batch still owned by the send pump | Track the active batch under the same condition lock; let the pump retire it before dropping the remaining queue, and add a close-race regression test |
+| Extended Ray integration twice observed a later Reporter snapshot paired with earlier broker/subscriber counters | Treat runtime status as two sequential actor snapshots and wait until broker ingress, subscriber acceptance, and Reporter predicates all converge |
+| Event-family configuration cleanup left one obsolete Gateway import | Remove the unused constant and rerun scoped lint |
+| One resumable final-suite wait call had malformed tool syntax | Reissued the wait for the same session; the suite completed with 55 passing tests |
+
+## 2026-09-20 — Phase 2
+
+### Status
+
+- Phase: Direct State Sync
+- State: complete
+
+### Actions
+
+- Recovered `plannings/collectors/` and confirmed Phase 1 is complete.
+- Confirmed Phase 2 scope from the formal design: isolated Direct transport, applied ACK/cursor/epoch recovery, bounded queues, snapshot resync, and one shadow control-state consumer.
+- Recorded the current dirty worktree and preserved unrelated `verl`, `.planning/`, `working/`, and Phase 1 changes.
+- Read the formal Direct deployment, ordering, backpressure, applied-ACK, recovery, and Router migration sections.
+- Audited the existing event envelope and local delivery ingress; confirmed `deliver()` can remain the non-forwarding target boundary.
+- Audited the Router actor shell, current callback-owned state, Gateway event facts, and actor-local runtime ownership.
+- Selected Gateway session lifecycle as the first Direct shadow slice because it exercises real cross-Actor state sync without changing Router decisions or duplicating existing inflight ownership.
+- Confirmed the existing driver composition layer can inject the Router Actor handle from `LLMServerClient` into Gateway actors only when the independent Direct feature flag is enabled.
+- Added versioned Direct batch/snapshot/ACK DTOs, endpoint validation, a bounded source outbox, retry, applied cursors, epoch isolation, and explicit stale/resync health.
+- Added the Router's lazy Gateway-session shadow projector and non-forwarding endpoint methods without changing route selection or existing DataStore writers.
+- Wired the default-off Direct flag through Framework composition, GatewayManager, and Gateway actors; enabled actors share their existing local event runtime and install an authoritative snapshot before accepting sessions.
+- Corrected first-pass edge cases for snapshot watermark capture, oversized single events, ACK identity validation, terminal snapshot status, and invalid transport DTO handling.
+- Applied repository formatting/import organization; scoped lint and compile checks pass for the Phase 2 source files.
+- Added focused Direct tests for DTO round trips, contiguous/duplicate delivery, sequence gaps, epoch replacement, subscriber failure, ACK-loss retry, bounded overflow/recovery, and non-blocking publish.
+- Added Router shadow tests proving session lifecycle projection does not mutate routing status and malformed schemas fail with `RESYNC_REQUIRED`.
+- Added a Ray integration test covering GatewayManager startup snapshot, session open/close delivery, applied cursor advancement, and source health against a remote shadow endpoint.
+- Extended configuration tests for Direct default-off behavior, strict boolean validation, and Router handle injection at the existing Framework composition boundary.
+- Added source-wide revision propagation, configurable terminal tombstone bounds, and fail-fast Direct handshake ordering before the Gateway HTTP server becomes ready.
+- Added a bounded consecutive retry budget; exhaustion marks the Direct view stale so snapshot recovery replaces indefinite BUSY/error retries.
+- Fixed the default-path actor construction regression and reran its exact test together with the Direct Ray integration.
+- Hardened receiver validation for subscription filters, event schemas, source health, and same-epoch snapshot revision rollback.
+- Preserved terminal close reasons in the shadow view and added explicit unsupported event-schema coverage.
+- Verified two Gateway actors maintain independent source epochs/cursors while sharing one Router shadow subscription.
+- Completed final scope review: no Global transport/telemetry implementation was introduced and unrelated worktree changes remain untouched.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Selected plan root | `plannings/collectors/` |
+| Phase 2 status | complete |
+| Global telemetry scope | explicitly deferred to Phase 3 |
+| Direct core and Router shadow tests | covered by the final 37-test local suite |
+| Gateway-to-Ray Direct integration | 3 passed using the existing read-only veRL export, including two independent Gateway streams |
+| Focused default-off/config compatibility checks | 15 passed |
+| Combined Phase 2 focused suite | 30 passed |
+| Complete event package plus Router Direct shadow | 28 passed |
+| Events, metrics, and focused Router legacy regression | 57 passed |
+| Gateway compatible regression after excluding documented baseline failures | 74 passed, 9 deselected |
+| Router balancer non-Ray suite | 39 passed; Ray integration collection blocked by missing veRL router module |
+| Final Direct validation plus Phase 1 event/metrics regression | 37 passed |
+| Direct hot-path enqueue benchmark | three batches, median 3.219-3.280 us and P99 10.853-11.845 us with the target blocked |
+| Frozen Router acquire/release rerun | median 28.383-29.804 us; P99 84.677-99.069 us, above the 72.990 us historical baseline despite no Phase 2 hot-path code change |
+| Focused Phase 1 integration rerun | 15 passed, 135 deselected |
+| Final format, Ruff, compileall, and diff checks | passed |
+
+## 2026-09-20 — Phase 1
+
+### Status
+
+- Phase: Minimal Local Vertical Slice
+- State: complete
+
+### Actions
+
+- Recovered the user-selected planning location and confirmed its lifecycle files were missing.
+- Read the Phase 0 contract and the separate completed-plan record.
+- Recorded the existing uncommitted event, metrics, Gateway, Manager, Framework, and test changes as candidate Phase 1 implementation.
+- Started a contract-first audit to avoid duplicate or scattershot changes.
+- Audited the event envelope, context binding, publisher, metric DTOs, and Gateway metrics projector.
+- Recorded two candidate contract mismatches for validation against the formal design before editing code.
+- Audited local bus delivery, queue isolation, lifecycle tests, and the formal Task Metrics integration boundary.
+- Confirmed that the fragment field mismatch must be corrected to the frozen `incomplete_reasons` contract.
+- Audited Gateway, Manager, and Framework diffs; the vertical path is present but local Task Metrics is always enabled.
+- Identified the missing disabled-path configuration gate as a Phase 1 acceptance gap.
+- Chose a narrow configuration fix: validate `off|shadow|primary` in `GatewayActorConfig`, build no event runtime for `off`, and wire the frozen nested key through the existing Framework entry point.
+- Implemented the three audited contract fixes: default-off runtime gating, canonical `incomplete_reasons`, and non-negative event sequence/timestamp boundaries.
+- Updated only the focused configuration, local event, projector, Gateway integration, Manager, and Framework wiring tests.
+- Reduced allocation in the event hot path while preserving immutable envelope and DTO behavior.
+- Completed final scope review; no Direct or Global transport implementation was introduced.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Selected plan root | `plannings/collectors/` |
+| Phase 0 artifact | present |
+| Phase 1 source/tests | present, uncommitted, and validated |
+| Unrelated worktree changes | present; preserved |
+| Event and metrics focused tests | 22 passed |
+| Scoped Ruff lint | passed |
+| Scoped Ruff format check | passed after formatting `uni_agent/gateway/config.py` |
+| Focused Phase 1 integration tests | 17 passed; includes default-off, config wiring, Gateway facts/fragments, Manager list compatibility, and Framework post-selection attachment |
+| Local/Router collector regression plus Ray DTO | 72 passed |
+| Phase 0 compatibility suite | 31 passed, 1 pre-existing logging-capture failure |
+| Initial Phase 1 performance run | no-subscriber P99 122.512 us; inline Gateway Projector P99 111.350 us; both above the frozen 25/100 us budgets |
+| Five-batch performance rerun | no-subscriber P99 42.466-80.895 us (repeatable failure); inline Projector P99 86.015-116.400 us (mixed) |
+| Performance after allocation reduction | five batches passed: no-subscriber P99 20.598-23.452 us; inline Projector P99 61.177-67.870 us |
+| Final focused Phase 1 suite | 39 passed |
+| Format, Ruff, compileall, and diff checks | passed |
+
+### Errors
+
+| Error | Resolution |
+|---|---|
+| Initial Phase 2 scoped format/lint found two formatting differences and three import-order errors | Apply the repository formatter/import organizer after correcting the first-pass transport edge cases |
+| Gateway Direct integration test could not import `verl.workers.rollout.replica` from the user-modified pinned submodule | Reuse the existing read-only veRL export and Conda runtime library path already recorded during Phase 1; do not mutate `verl` |
+| Broad Gateway regression: 10 failures among 83 tests | Seven are the known missing `merge_context_tokens` dependency defect, two are the existing stdout-vs-caplog issue, and one exposed a Phase 2 default-path actor-constructor compatibility regression; preserve the old constructor call when Direct is disabled |
+| Full Router balancer suite could not collect `get_router_handle` from the user-modified veRL source | Retry with the same existing read-only veRL export; keep the submodule untouched |
+| Read-only veRL export also lacks the newer `verl.workers.rollout.router` module required by Router Ray integration | Run all non-Ray balancer modules and retain the dedicated new Gateway-to-Ray Direct integration as Phase 2 cross-Actor evidence |
+| First Phase 2 Router microbenchmark had P99 89.069-93.056 us versus the frozen 72.990 us baseline | Rerun with the baseline's explicit Loguru handler removal before treating the increase as a regression; Direct enqueue itself measured 10.853-11.845 us P99 |
+| Resolver did not find lifecycle files under the selected plan root | Created `task_plan.md`, `findings.md`, and `progress.md` in the user-specified directory before continuing |
+| `ruff format --check` reported `uni_agent/gateway/config.py` | Apply the repository formatter to that file, then rerun the scoped checks |
+| Compatibility test `test_generate_sequences_reports_unfinished_episode_count` saw the expected log on stdout but `caplog.text` was empty | Record as the existing stdout-vs-caplog baseline issue; production output contains the asserted values and no collector code is involved |
+| Initial 100k-event performance run exceeded both Phase 1 P99 budgets despite acceptable medians | Rerun multiple isolated batches as required by the baseline; optimize only if the result is repeatable |
+| Hot-path optimization left `uni_agent/events/model.py` outside formatter output | Format that file, then rerun lint/tests and the exact same benchmark shape |

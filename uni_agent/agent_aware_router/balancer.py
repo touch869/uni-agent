@@ -20,13 +20,17 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
+from uuid import uuid4
 
 import httpx
 import ray
 from omegaconf import DictConfig, OmegaConf
 
 from uni_agent.events import (
+    ADMISSION_ROUTER_OBSERVATION_SUBSCRIPTION,
     GATEWAY_SESSION_DIRECT_SUBSCRIPTION,
+    REPLICA_CAPACITY_CHANGED,
+    ROUTE_COMMITTED,
     SESSION_CLOSED,
     SESSION_OPENED,
     DeliveryMode,
@@ -34,14 +38,17 @@ from uni_agent.events import (
     DirectAckStatus,
     DirectEventEndpoint,
     DirectStateBatch,
+    EventPublisher,
     LocalEventBus,
     Scope,
     SnapshotAndCursor,
     SubscriptionSpec,
 )
+from uni_agent.gateway.admission import AdmissionSignalsProjector
 
 from .collectors import CollectorManager
 from .config import KVCAwareConfig
+from .router_state import RouterStateMode, RouterStickyStateProjector
 from .session_state import GatewaySessionStateProjector
 from .store import DataStore
 from .strategies import (
@@ -65,6 +72,7 @@ class KVCAwareBalancer:
         servers: dict[str, Any],
         config: dict[str, Any] | DictConfig | None = None,
         provider_factory: Callable[..., Any] | None = None,
+        router_state_mode: str | RouterStateMode | None = None,
     ) -> None:
         if not servers:
             raise ValueError("servers must be non-empty")
@@ -101,10 +109,52 @@ class KVCAwareBalancer:
             "on_servers_removed": [],
         }
         self._store = DataStore()
+        self._router_state_mode = self._resolve_router_state_mode(router_state_mode, rollout_config)
+        self._router_sticky_projector: RouterStickyStateProjector | None = None
+        self._router_sticky_update_handler = None
+        self._router_sticky_update_observer = None
+        self._router_event_bus: LocalEventBus | None = None
+        self._router_event_publisher: EventPublisher | None = None
+        self._admission_signals_projector: AdmissionSignalsProjector | None = None
+        self._capacity_versions: dict[str, int] = {}
+        self._replica_epochs: dict[str, str] = {}
+        self._router_observation_failures = 0
+        self._init_router_state_runtime()
         self._direct_event_bus: LocalEventBus | None = None
         self._direct_session_projector: GatewaySessionStateProjector | None = None
         self._direct_session_endpoint: DirectEventEndpoint | None = None
         self._init_provider()
+
+    def _init_router_state_runtime(self) -> None:
+        if self._router_state_mode is RouterStateMode.LEGACY:
+            return
+        projector = RouterStickyStateProjector(self._router_state_mode, self._store)
+        self._router_sticky_projector = projector
+        if self._router_state_mode is RouterStateMode.SHADOW:
+            self._router_sticky_update_observer = projector.observe
+        else:
+            self._router_sticky_update_handler = projector.apply
+
+        bus = LocalEventBus()
+        admission = AdmissionSignalsProjector()
+        bus.subscribe(
+            SubscriptionSpec(
+                subscription_id=ADMISSION_ROUTER_OBSERVATION_SUBSCRIPTION,
+                event_types=(ROUTE_COMMITTED, REPLICA_CAPACITY_CHANGED),
+                scope=Scope.LOCAL,
+                delivery=DeliveryMode.INLINE,
+            ),
+            admission.apply,
+        )
+        self._router_event_bus = bus
+        self._router_event_publisher = EventPublisher(
+            bus,
+            run_id=f"router-run-{uuid4().hex}",
+            producer_id=f"router:{','.join(sorted(self._servers))}",
+        )
+        self._admission_signals_projector = admission
+        self._capacity_versions = {replica_id: 0 for replica_id in self._servers}
+        self._replica_epochs = {replica_id: uuid4().hex for replica_id in self._servers}
 
     def _ensure_direct_session_endpoint(self) -> DirectEventEndpoint:
         endpoint = self._direct_session_endpoint
@@ -112,6 +162,17 @@ class KVCAwareBalancer:
             return endpoint
         bus = LocalEventBus()
         projector = GatewaySessionStateProjector()
+
+        def apply_session_event(event) -> None:
+            projector.apply(event)
+            if self._admission_signals_projector is not None:
+                self._admission_signals_projector.apply(event)
+
+        def install_snapshot(snapshot) -> None:
+            projector.install_snapshot(snapshot)
+            if self._admission_signals_projector is not None:
+                self._admission_signals_projector.install_gateway_snapshot(snapshot)
+
         bus.subscribe(
             SubscriptionSpec(
                 subscription_id=GATEWAY_SESSION_DIRECT_SUBSCRIPTION,
@@ -119,9 +180,9 @@ class KVCAwareBalancer:
                 scope=Scope.DIRECT,
                 delivery=DeliveryMode.STATE_SYNC,
             ),
-            projector.apply,
+            apply_session_event,
         )
-        endpoint = DirectEventEndpoint(bus, snapshot_installer=projector.install_snapshot)
+        endpoint = DirectEventEndpoint(bus, snapshot_installer=install_snapshot)
         self._direct_event_bus = bus
         self._direct_session_projector = projector
         self._direct_session_endpoint = endpoint
@@ -163,6 +224,25 @@ class KVCAwareBalancer:
             "streams": list(self._direct_session_endpoint.status()),
         }
 
+    def get_router_state_status(self) -> dict[str, Any]:
+        """Return Router input ownership and observe-only admission state."""
+        if self._router_sticky_projector is None:
+            return {
+                "mode": RouterStateMode.LEGACY.value,
+                "enabled": False,
+                "sticky": {"commit_owner": "legacy"},
+                "admission": {"enabled": False},
+                "observation_failures": 0,
+            }
+        admission = self._admission_signals_projector
+        return {
+            "mode": self._router_state_mode.value,
+            "enabled": True,
+            "sticky": self._router_sticky_projector.status(),
+            "admission": admission.status() if admission is not None else {"enabled": False},
+            "observation_failures": self._router_observation_failures,
+        }
+
     def _fetch_rollout_config(self) -> Any | None:
         """Return the first available rollout config."""
         for handle in self._servers.values():
@@ -186,6 +266,82 @@ class KVCAwareBalancer:
             else:
                 current = getattr(current, key, None)
         return current
+
+    def _resolve_router_state_mode(
+        self,
+        explicit: str | RouterStateMode | None,
+        rollout_config: Any | None,
+    ) -> RouterStateMode:
+        value = explicit
+        if value is None:
+            value = self._read_nested(
+                rollout_config,
+                "custom",
+                "agent_framework",
+                "collectors",
+                "router_state",
+                "mode",
+            )
+        if value is None:
+            return RouterStateMode.LEGACY
+        if isinstance(value, RouterStateMode):
+            return value
+        if not isinstance(value, str):
+            raise ValueError(f"collectors.router_state.mode must be a string, got {type(value).__name__}")
+        try:
+            return RouterStateMode(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"collectors.router_state.mode must be one of legacy, shadow, or projector, got {value!r}"
+            ) from exc
+
+    def _publish_router_fact(self, event_type: str, payload: dict[str, Any]) -> None:
+        publisher = self._router_event_publisher
+        if publisher is None:
+            return
+        try:
+            receipt = publisher.publish(event_type, payload)
+        except Exception:
+            self._router_observation_failures += 1
+            logger.exception("Failed to publish Router fact %s", event_type)
+            return
+        self._router_observation_failures += receipt.failed + receipt.dropped
+
+    def _publish_capacity_change(
+        self,
+        replica_id: str,
+        *,
+        reason: str,
+        route_request_id: str | None = None,
+        health: str = "healthy",
+    ) -> None:
+        publisher = self._router_event_publisher
+        if publisher is None:
+            return
+        version = self._capacity_versions.get(replica_id, 0) + 1
+        self._capacity_versions[replica_id] = version
+        if route_request_id is not None:
+            self._publish_router_fact(
+                ROUTE_COMMITTED,
+                {
+                    "request_id": route_request_id,
+                    "replica_id": replica_id,
+                    "ledger_version": version,
+                    "status": "committed",
+                },
+            )
+        self._publish_router_fact(
+            REPLICA_CAPACITY_CHANGED,
+            {
+                "replica_id": replica_id,
+                "replica_epoch": self._replica_epochs[replica_id],
+                "ledger_version": version,
+                "reason": reason,
+                "health": health,
+                "replica_inflight": self._inflight.get(replica_id, 0),
+                "total_inflight": self.get_total_inflight(),
+            },
+        )
 
     @classmethod
     def _router_override(cls, rollout_config: Any | None) -> dict[str, Any] | None:
@@ -357,12 +513,18 @@ class KVCAwareBalancer:
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
         """Release a server and notify statistic collectors."""
-        if self._inflight.get(server_id, 0) > 0:
+        released = self._inflight.get(server_id, 0) > 0
+        if released:
             self._inflight[server_id] -= 1
         self._fire("on_release", server_id, request_id)
+        if released and self._router_event_publisher is not None:
+            self._publish_capacity_change(server_id, reason="release")
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Return the highest-ranked server id and handle."""
+        projector = self._router_sticky_projector
+        if projector is not None and self._router_state_mode is RouterStateMode.PROJECTOR and not projector.healthy:
+            raise RuntimeError("Router sticky Projector is unhealthy")
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
         t0 = time.perf_counter()
@@ -381,6 +543,10 @@ class KVCAwareBalancer:
         server_id = ranking[0]
         self._inflight[server_id] = self._inflight.get(server_id, 0) + 1
         self._fire("on_acquire", request_id, server_id, prompt_ids)
+        if projector is not None and self._router_state_mode is RouterStateMode.PROJECTOR and not projector.healthy:
+            raise RuntimeError("Router sticky Projector failed while committing the route")
+        if self._router_event_publisher is not None:
+            self._publish_capacity_change(server_id, reason="acquire", route_request_id=request_id)
         logger.debug(
             "request=%s routed to server=%s (ranking=%s, pool=%s, route=%.2fms, strategy=[%s])",
             request_id,
@@ -411,7 +577,14 @@ class KVCAwareBalancer:
 
     def clear_sticky_cache(self) -> dict:
         """Clear sticky bindings while preserving prefix checkpoints."""
-        cleared = self._store.clear_sticky_bindings()
+        projector = self._router_sticky_projector
+        if projector is None:
+            cleared = self._store.clear_sticky_bindings()
+        elif self._router_state_mode is RouterStateMode.PROJECTOR:
+            cleared = projector.clear(commit=True)
+        else:
+            cleared = self._store.clear_sticky_bindings()
+            projector.clear(commit=False)
         loads = dict(self._inflight)
         logger.info("clear_sticky_cache: cleared %s binding(s); server_loads=%s", cleared, loads)
         return {"cleared_entries": cleared, "server_loads": loads}
@@ -425,11 +598,21 @@ class KVCAwareBalancer:
         for sid, handle in servers.items():
             self._servers[sid] = handle
             self._inflight.setdefault(sid, 0)
+            if self._router_event_publisher is not None:
+                self._capacity_versions.setdefault(sid, 0)
+                self._replica_epochs[sid] = uuid4().hex
+                self._publish_capacity_change(sid, reason="server_added")
 
     def remove_servers(self, server_ids: list[str]) -> None:
         """Bulk-remove servers; fires ``on_servers_removed`` to invalidate sticky bindings."""
+        removed = []
         for sid in server_ids:
+            if sid in self._servers:
+                removed.append(sid)
             self._servers.pop(sid, None)
             self._inflight.pop(sid, None)
         if server_ids:
             self._fire("on_servers_removed", server_ids)
+            if self._router_event_publisher is not None:
+                for server_id in removed:
+                    self._publish_capacity_change(server_id, reason="server_removed", health="removed")

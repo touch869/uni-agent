@@ -22,7 +22,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, Callable
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
@@ -72,6 +72,7 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
 # is folded from this row — same acquire-record / release-consume shape as the
 # per-request "turn" counter below.
 _PROMPT_LEN_KEY = "prompt_len"
+StickyUpdateHandler = Callable[[StickyUpdate], None]
 
 
 def _avg(delta_sum: float, delta_cnt: float) -> float:
@@ -92,9 +93,18 @@ class Collector:
         parser: Parser instance (vLLM KV, vLLM Metrics, etc.)
     """
 
-    def __init__(self, transport: Transport, parser: Parser) -> None:
+    def __init__(
+        self,
+        transport: Transport,
+        parser: Parser,
+        *,
+        sticky_update_handler: StickyUpdateHandler | None = None,
+        sticky_update_observer: StickyUpdateHandler | None = None,
+    ) -> None:
         self._transport = transport
         self._parser = parser
+        self._sticky_update_handler = sticky_update_handler
+        self._sticky_update_observer = sticky_update_observer
         self._data_store = DataStore()
         self._future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
@@ -129,7 +139,12 @@ class Collector:
             elif isinstance(result, MetricsUpdate):
                 self._write_metrics_update(result)
             elif isinstance(result, StickyUpdate):
-                self._write_sticky_update(result)
+                if self._sticky_update_handler is None:
+                    self._write_sticky_update(result)
+                else:
+                    self._sticky_update_handler(result)
+                if self._sticky_update_observer is not None:
+                    self._sticky_update_observer(result)
             else:
                 # None is normal for statistic parsers that skip an event
                 # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
@@ -395,6 +410,9 @@ class Collector:
             self._loop_thread.join(timeout=10)
             self._loop_thread = None
 
+        if not self._loop.is_running() and not self._loop.is_closed():
+            self._loop.close()
+
         self._future = None
 
 
@@ -468,7 +486,12 @@ def get_collector(
         from .parse.basic.sticky import StickyParser
         from .transport.callback import CallbackTransport
 
-        return Collector(CallbackTransport(balancer_handler), StickyParser())
+        return Collector(
+            CallbackTransport(balancer_handler),
+            StickyParser(),
+            sticky_update_handler=getattr(balancer_handler, "_router_sticky_update_handler", None),
+            sticky_update_observer=getattr(balancer_handler, "_router_sticky_update_observer", None),
+        )
 
     if name == "inflight_stat":
         from .parse.basic.inflight import InflightParser

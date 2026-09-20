@@ -41,18 +41,22 @@ from .global_bus import (
 )
 from .model import Event, EventBatch, EventContext
 from .names import (
+    ADMISSION_ROUTER_OBSERVATION_SUBSCRIPTION,
     GATEWAY_GLOBAL_FORWARDER_SUBSCRIPTION,
     GATEWAY_SESSION_DIRECT_SUBSCRIPTION,
     GATEWAY_SESSION_STATE_SCOPE,
     GATEWAY_TELEMETRY_SUBSCRIPTION,
     GENERATION_FINISHED,
     GENERATION_PREPARED,
+    REPLICA_CAPACITY_CHANGED,
+    ROUTE_COMMITTED,
     SESSION_CLOSED,
     SESSION_OPENED,
 )
 from .publisher import EventPublisher
 
 __all__ = [
+    "ADMISSION_ROUTER_OBSERVATION_SUBSCRIPTION",
     "DeliveryAck",
     "DeliveryMode",
     "DirectAck",
@@ -83,8 +87,10 @@ __all__ = [
     "FlushReport",
     "LocalEventBus",
     "PublishReceipt",
+    "REPLICA_CAPACITY_CHANGED",
     "RayGlobalEventBus",
     "ReporterHealth",
+    "ROUTE_COMMITTED",
     "Scope",
     "SESSION_CLOSED",
     "SESSION_OPENED",
