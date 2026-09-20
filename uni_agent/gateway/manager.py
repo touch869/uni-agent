@@ -31,6 +31,7 @@ class GatewayManager:
         gateway_count: int,
         gateway_actor_config: GatewayActorConfig | None = None,
         direct_event_target=None,
+        global_telemetry_runtime=None,
     ):
         if gateway_count <= 0:
             raise ValueError("gateway_count must be positive")
@@ -38,6 +39,8 @@ class GatewayManager:
             raise ValueError("gateway_actor_config is required when gateway_count > 0")
         if gateway_actor_config.direct_state_sync_enabled and direct_event_target is None:
             raise ValueError("direct_event_target is required when Direct state sync is enabled")
+        if gateway_actor_config.global_telemetry_enabled and global_telemetry_runtime is None:
+            raise ValueError("global_telemetry_runtime is required when Global telemetry is enabled")
 
         from uni_agent.gateway.gateway import GatewayActor
 
@@ -48,8 +51,11 @@ class GatewayManager:
         if not node_ids:
             raise RuntimeError("No alive CPU nodes available for GatewayActor placement")
 
-        cross_actor_events_enabled = gateway_actor_config.direct_state_sync_enabled
+        cross_actor_events_enabled = (
+            gateway_actor_config.direct_state_sync_enabled or gateway_actor_config.global_telemetry_enabled
+        )
         event_run_id = f"gateway-run-{uuid4().hex}" if cross_actor_events_enabled else None
+        self.global_telemetry_runtime = global_telemetry_runtime
         self.gateways = []
         for i in range(gateway_count):
             actor_class = GatewayActor.options(
@@ -62,6 +68,8 @@ class GatewayManager:
                 transport_targets = {}
                 if gateway_actor_config.direct_state_sync_enabled:
                     transport_targets["direct_event_target"] = direct_event_target
+                if gateway_actor_config.global_telemetry_enabled:
+                    transport_targets["global_event_target"] = global_telemetry_runtime.publish_target
                 gateway = actor_class.remote(
                     gateway_actor_config,
                     backend=llm_client,
@@ -132,11 +140,17 @@ class GatewayManager:
 
     async def shutdown(self) -> None:
         """Stop owned gateway actors and clear routing state."""
+        global_telemetry_runtime = getattr(self, "global_telemetry_runtime", None)
         try:
             if self.gateways:
                 await asyncio.gather(*(gateway.shutdown.remote() for gateway in self.gateways))
         finally:
-            self.gateways = []
-            self.gateway_count = 0
-            self.active_sessions_per_gateway = []
-            self._session_to_gateway_index = {}
+            try:
+                if global_telemetry_runtime is not None:
+                    await global_telemetry_runtime.shutdown()
+            finally:
+                self.global_telemetry_runtime = None
+                self.gateways = []
+                self.gateway_count = 0
+                self.active_sessions_per_gateway = []
+                self._session_to_gateway_index = {}

@@ -103,6 +103,41 @@ async def test_gateway_manager_finalization_result_preserves_legacy_list_contrac
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_closes_global_runtime_when_gateway_shutdown_fails():
+    from uni_agent.gateway.manager import GatewayManager
+
+    async def fail_shutdown():
+        raise RuntimeError("gateway shutdown failed")
+
+    class _FailingGateway:
+        shutdown = _FakeRemoteMethod(fail_shutdown)
+
+    class _Runtime:
+        def __init__(self):
+            self.closed = False
+
+        async def shutdown(self):
+            self.closed = True
+
+    runtime = _Runtime()
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [_FailingGateway()]
+    manager.gateway_count = 1
+    manager.active_sessions_per_gateway = [0]
+    manager._session_to_gateway_index = {}
+    manager.global_telemetry_runtime = runtime
+
+    with pytest.raises(RuntimeError, match="gateway shutdown failed"):
+        await manager.shutdown()
+
+    assert runtime.closed
+    assert manager.gateways == []
+    assert manager.global_telemetry_runtime is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_gateway_manager_rejects_zero_gateway_count():
     """``GatewayManager`` raises ``ValueError`` when ``gateway_count=0``, rather
     than silently spawning a half-initialized manager."""

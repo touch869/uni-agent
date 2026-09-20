@@ -239,6 +239,7 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
         ({}, {"coalesce_reserved_exact_requests": False}, True, True, {}, {}),
         ({}, {"collectors": {"task_metrics": {"mode": "primary"}}}, True, True, {}, {}),
         ({}, {"collectors": {"direct_state_sync": {"enabled": True}}}, True, True, {}, {}),
+        ({}, {"collectors": {"global_telemetry": {"enabled": True}}}, True, True, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -275,11 +276,13 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
             gateway_count,
             gateway_actor_config,
             direct_event_target=None,
+            global_telemetry_runtime=None,
         ):
             captured["llm_client"] = llm_client
             captured["gateway_count"] = gateway_count
             captured["gateway_actor_config"] = gateway_actor_config
             captured["direct_event_target"] = direct_event_target
+            captured["global_telemetry_runtime"] = global_telemetry_runtime
 
     monkeypatch.setattr(
         entry_module,
@@ -287,6 +290,18 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
         lambda cfg: _RolloutConfig() if "multi_turn" in cfg else _ModelConfig(),
     )
     monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+    global_runtime = object()
+    global_runtime_starts = []
+
+    def start_global_runtime(config):
+        global_runtime_starts.append(config)
+        return global_runtime
+
+    monkeypatch.setattr(
+        "uni_agent.telemetry.GlobalTelemetryRuntime.start",
+        start_global_runtime,
+    )
+
     direct_event_target = object()
     llm_client = types.SimpleNamespace(_load_balancer=direct_event_target)
     config = OmegaConf.create(
@@ -330,6 +345,15 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     direct_enabled = agent_framework_config.get("collectors", {}).get("direct_state_sync", {}).get("enabled", False)
     assert captured["gateway_actor_config"].direct_state_sync_enabled is direct_enabled
     assert captured["direct_event_target"] is (direct_event_target if direct_enabled else None)
+    global_enabled = agent_framework_config.get("collectors", {}).get("global_telemetry", {}).get("enabled", False)
+    assert captured["gateway_actor_config"].global_telemetry_enabled is global_enabled
+    assert captured["gateway_actor_config"].global_telemetry_event_types == (
+        "SessionOpened",
+        "GenerationFinished",
+        "SessionClosed",
+    )
+    assert captured["global_telemetry_runtime"] is (global_runtime if global_enabled else None)
+    assert len(global_runtime_starts) == int(global_enabled)
     assert captured["gateway_actor_config"].hf_model_type == "deepseek_v4"
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs

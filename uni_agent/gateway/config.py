@@ -53,6 +53,15 @@ class GatewayActorConfig:
         direct_state_sync_max_retries: Consecutive delivery attempts before the view becomes stale.
         direct_state_sync_retry_backoff_s: Delay between retryable delivery attempts.
         direct_state_sync_max_terminal_entities: Bounded terminal-session snapshot retention.
+        global_telemetry_enabled: Whether Gateway facts are sent through the Global telemetry runtime.
+        global_telemetry_event_types: Existing event families selected for Global forwarding.
+        global_telemetry_max_queue_events: Maximum pending telemetry events per Gateway source.
+        global_telemetry_max_queue_bytes: Maximum pending telemetry bytes per Gateway source.
+        global_telemetry_max_batch_events: Maximum events in one telemetry batch.
+        global_telemetry_max_batch_bytes: Maximum bytes in one telemetry batch.
+        global_telemetry_flush_interval_s: Maximum source-side batching delay.
+        global_telemetry_max_retries: Delivery attempts before an observation batch is incomplete.
+        global_telemetry_retry_backoff_s: Delay between retryable telemetry delivery attempts.
     """
 
     tokenizer: Any
@@ -77,6 +86,19 @@ class GatewayActorConfig:
     direct_state_sync_max_retries: int = 3
     direct_state_sync_retry_backoff_s: float = 0.01
     direct_state_sync_max_terminal_entities: int = 4096
+    global_telemetry_enabled: bool = False
+    global_telemetry_event_types: tuple[str, ...] = (
+        "SessionOpened",
+        "GenerationFinished",
+        "SessionClosed",
+    )
+    global_telemetry_max_queue_events: int = 4096
+    global_telemetry_max_queue_bytes: int = 8 * 1024 * 1024
+    global_telemetry_max_batch_events: int = 128
+    global_telemetry_max_batch_bytes: int = 256 * 1024
+    global_telemetry_flush_interval_s: float = 0.02
+    global_telemetry_max_retries: int = 3
+    global_telemetry_retry_backoff_s: float = 0.01
 
     def __post_init__(self) -> None:
         if type(self.enable_tool_parser_cache) is not bool:
@@ -115,6 +137,31 @@ class GatewayActorConfig:
             raise ValueError("direct_state_sync_retry_backoff_s must be non-negative")
         if self.direct_state_sync_max_terminal_entities <= 0:
             raise ValueError("direct_state_sync_max_terminal_entities must be positive")
+        if type(self.global_telemetry_enabled) is not bool:
+            raise ValueError(
+                f"global_telemetry_enabled must be a bool, got {type(self.global_telemetry_enabled).__name__}"
+            )
+        if isinstance(self.global_telemetry_event_types, str):
+            raise ValueError("global_telemetry_event_types must be a sequence of event names")
+        event_types = tuple(dict.fromkeys(self.global_telemetry_event_types))
+        if not event_types or any(not isinstance(event_type, str) or not event_type for event_type in event_types):
+            raise ValueError("global_telemetry_event_types must contain non-empty event names")
+        object.__setattr__(self, "global_telemetry_event_types", event_types)
+        if (
+            min(
+                self.global_telemetry_max_queue_events,
+                self.global_telemetry_max_queue_bytes,
+                self.global_telemetry_max_batch_events,
+                self.global_telemetry_max_batch_bytes,
+                self.global_telemetry_max_retries,
+            )
+            <= 0
+        ):
+            raise ValueError("Global telemetry queue, batch, and retry budgets must be positive")
+        if self.global_telemetry_flush_interval_s < 0:
+            raise ValueError("global_telemetry_flush_interval_s must be non-negative")
+        if self.global_telemetry_retry_backoff_s < 0:
+            raise ValueError("global_telemetry_retry_backoff_s must be non-negative")
         if self.prompt_length is not None and self.prompt_length <= 0:
             raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")
         if self.response_length is not None and self.response_length <= 0:

@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from uni_agent.events import (
+    GATEWAY_GLOBAL_FORWARDER_SUBSCRIPTION,
     GATEWAY_SESSION_DIRECT_SUBSCRIPTION,
     GATEWAY_SESSION_STATE_SCOPE,
     SESSION_CLOSED,
@@ -28,6 +29,7 @@ from uni_agent.events import (
     DirectSyncStatus,
     EventContext,
     EventPublisher,
+    GlobalBusForwarder,
     LocalEventBus,
     Scope,
     StateSnapshot,
@@ -85,6 +87,7 @@ class _GatewayActor:
         config: GatewayActorConfig,
         backend,
         direct_event_target=None,
+        global_event_target=None,
         event_run_id: str | None = None,
         event_source_id: str | None = None,
     ):
@@ -122,7 +125,8 @@ class _GatewayActor:
         self._direct_terminal_sessions: OrderedDict[str, dict[str, Any]] | None = None
         self._direct_max_terminal_entities = config.direct_state_sync_max_terminal_entities
         self._direct_state_revision = 0
-        if config.task_metrics_mode != "off" or config.direct_state_sync_enabled:
+        self._global_forwarder: GlobalBusForwarder | None = None
+        if config.task_metrics_mode != "off" or config.direct_state_sync_enabled or config.global_telemetry_enabled:
             self._event_bus = LocalEventBus()
             self._event_source_instance = event_source_id or f"gateway-{uuid4().hex}"
             self._event_publisher = EventPublisher(
@@ -167,6 +171,35 @@ class _GatewayActor:
                 install_snapshot=_install_snapshot,
                 max_retries=config.direct_state_sync_max_retries,
                 retry_backoff_s=config.direct_state_sync_retry_backoff_s,
+            )
+        if config.global_telemetry_enabled:
+            if global_event_target is None:
+                raise ValueError("global_event_target is required when Global telemetry is enabled")
+            assert self._event_bus is not None
+            assert self._event_publisher is not None
+
+            def _publish_global_batch(batch: dict[str, Any]) -> dict[str, Any]:
+                return global_event_target.publish_global_batch.remote(batch).future().result()
+
+            self._global_forwarder = GlobalBusForwarder(
+                self._event_bus,
+                SubscriptionSpec(
+                    subscription_id=GATEWAY_GLOBAL_FORWARDER_SUBSCRIPTION,
+                    event_types=config.global_telemetry_event_types,
+                    scope=Scope.GLOBAL,
+                    delivery=DeliveryMode.INLINE,
+                    max_queue_events=config.global_telemetry_max_queue_events,
+                    max_queue_bytes=config.global_telemetry_max_queue_bytes,
+                ),
+                run_id=self._event_publisher.run_id,
+                source_id=self._event_source_instance,
+                source_epoch=self._event_publisher.producer_epoch,
+                send_batch=_publish_global_batch,
+                max_batch_events=config.global_telemetry_max_batch_events,
+                max_batch_bytes=config.global_telemetry_max_batch_bytes,
+                flush_interval_s=config.global_telemetry_flush_interval_s,
+                max_retries=config.global_telemetry_max_retries,
+                retry_backoff_s=config.global_telemetry_retry_backoff_s,
             )
         self._event_runtime_closed = False
         self._app = FastAPI()
@@ -451,6 +484,9 @@ class _GatewayActor:
             if self._direct_bridge is not None:
                 await asyncio.to_thread(self._direct_bridge.close)
                 self._direct_bridge = None
+            if self._global_forwarder is not None:
+                await asyncio.to_thread(self._global_forwarder.close)
+                self._global_forwarder = None
             if self._task_metrics_projector is not None:
                 self._task_metrics_projector.close()
             if self._event_bus is not None:
@@ -474,6 +510,25 @@ class _GatewayActor:
             "resyncs": health.resyncs,
             "overflow_count": health.overflow_count,
             "stale_reason": health.stale_reason,
+        }
+
+    async def get_global_telemetry_status(self) -> dict[str, Any]:
+        """Expose source-side Global queue, retry, and loss state."""
+        if self._global_forwarder is None:
+            return {"enabled": False}
+        health = self._global_forwarder.health
+        return {
+            "enabled": True,
+            "status": health.status.value,
+            "pending_events": health.pending_events,
+            "pending_bytes": health.pending_bytes,
+            "pending_calls": health.pending_calls,
+            "accepted_batches": health.accepted_batches,
+            "accepted_events": health.accepted_events,
+            "retries": health.retries,
+            "dropped_events": health.dropped_events,
+            "incomplete_batches": health.incomplete_batches,
+            "last_error": health.last_error,
         }
 
     async def create_session(
