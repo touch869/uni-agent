@@ -8,6 +8,7 @@ forward to the right actor through Ray remote methods.
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 
 import ray
 
@@ -29,11 +30,15 @@ class GatewayManager:
         *,
         gateway_count: int,
         gateway_actor_config: GatewayActorConfig | None = None,
+        direct_event_target=None,
     ):
         if gateway_count <= 0:
             raise ValueError("gateway_count must be positive")
         if gateway_actor_config is None:
             raise ValueError("gateway_actor_config is required when gateway_count > 0")
+        if gateway_actor_config.direct_state_sync_enabled and direct_event_target is None:
+            raise ValueError("direct_event_target is required when Direct state sync is enabled")
+
         from uni_agent.gateway.gateway import GatewayActor
 
         # Round-robin across alive CPU nodes so gateway actors do not all pack onto
@@ -43,6 +48,8 @@ class GatewayManager:
         if not node_ids:
             raise RuntimeError("No alive CPU nodes available for GatewayActor placement")
 
+        cross_actor_events_enabled = gateway_actor_config.direct_state_sync_enabled
+        event_run_id = f"gateway-run-{uuid4().hex}" if cross_actor_events_enabled else None
         self.gateways = []
         for i in range(gateway_count):
             actor_class = GatewayActor.options(
@@ -51,7 +58,19 @@ class GatewayManager:
                     soft=True,
                 ),
             )
-            gateway = actor_class.remote(gateway_actor_config, backend=llm_client)
+            if cross_actor_events_enabled:
+                transport_targets = {}
+                if gateway_actor_config.direct_state_sync_enabled:
+                    transport_targets["direct_event_target"] = direct_event_target
+                gateway = actor_class.remote(
+                    gateway_actor_config,
+                    backend=llm_client,
+                    event_run_id=event_run_id,
+                    event_source_id=f"gateway-{i}",
+                    **transport_targets,
+                )
+            else:
+                gateway = actor_class.remote(gateway_actor_config, backend=llm_client)
             self.gateways.append(gateway)
         ray.get([gateway.start.remote() for gateway in self.gateways])
         self.gateway_count = len(self.gateways)
@@ -113,9 +132,11 @@ class GatewayManager:
 
     async def shutdown(self) -> None:
         """Stop owned gateway actors and clear routing state."""
-        if self.gateways:
-            await asyncio.gather(*(gateway.shutdown.remote() for gateway in self.gateways))
-        self.gateways = []
-        self.gateway_count = 0
-        self.active_sessions_per_gateway = []
-        self._session_to_gateway_index = {}
+        try:
+            if self.gateways:
+                await asyncio.gather(*(gateway.shutdown.remote() for gateway in self.gateways))
+        finally:
+            self.gateways = []
+            self.gateway_count = 0
+            self.active_sessions_per_gateway = []
+            self._session_to_gateway_index = {}

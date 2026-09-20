@@ -71,6 +71,7 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
         "enable_last_assistant_rollback",
         "enable_tool_parser_cache",
         "coalesce_reserved_exact_requests",
+        "direct_state_sync_enabled",
     ],
 )
 @pytest.mark.parametrize("value", ["true", 1, None])
@@ -87,6 +88,24 @@ def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
     from uni_agent.gateway.config import GatewayActorConfig
 
     assert GatewayActorConfig(tokenizer=FakeTokenizer()).enable_last_assistant_rollback is True
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "field",
+    [
+        "direct_state_sync_max_queue_events",
+        "direct_state_sync_max_queue_bytes",
+        "direct_state_sync_max_retries",
+        "direct_state_sync_max_terminal_entities",
+    ],
+)
+def test_gateway_actor_config_rejects_non_positive_direct_budgets(field):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match=field):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), **{field: 0})
 
 
 @pytest.mark.cpu
@@ -115,6 +134,7 @@ async def test_gateway_actor_keeps_task_metrics_runtime_off_by_default():
     assert actor._event_bus is None
     assert actor._event_publisher is None
     assert actor._task_metrics_projector is None
+    assert actor._direct_bridge is None
     assert finalization.metrics_fragment is None
     await actor.shutdown()
 

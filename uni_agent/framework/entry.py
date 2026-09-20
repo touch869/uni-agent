@@ -50,6 +50,8 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     collectors_cfg = af_cfg.get("collectors") or {}
     task_metrics_cfg = collectors_cfg.get("task_metrics") or {}
     task_metrics_mode = task_metrics_cfg.get("mode", "off")
+    direct_state_sync_cfg = collectors_cfg.get("direct_state_sync") or {}
+    direct_state_sync_enabled = direct_state_sync_cfg.get("enabled", False)
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
@@ -69,12 +71,21 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         allowed_request_sampling_param_keys=allowed_sampling_keys,
         coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
         task_metrics_mode=task_metrics_mode,
+        direct_state_sync_enabled=direct_state_sync_enabled,
+        direct_state_sync_max_queue_events=direct_state_sync_cfg.get("max_queue_events", 1024),
+        direct_state_sync_max_queue_bytes=direct_state_sync_cfg.get("max_queue_bytes", 1024 * 1024),
+        direct_state_sync_max_retries=direct_state_sync_cfg.get("max_retries", 3),
+        direct_state_sync_retry_backoff_s=direct_state_sync_cfg.get("retry_backoff_s", 0.01),
+        direct_state_sync_max_terminal_entities=direct_state_sync_cfg.get("max_terminal_entities", 4096),
     )
-    return GatewayManager(
-        llm_client=llm_client,
-        gateway_count=int(af_cfg["gateway_count"]),
-        gateway_actor_config=gateway_actor_config,
-    )
+
+    manager_kwargs = {
+        "llm_client": llm_client,
+        "gateway_count": int(af_cfg["gateway_count"]),
+        "gateway_actor_config": gateway_actor_config,
+        "direct_event_target": getattr(llm_client, "_load_balancer", None) if direct_state_sync_enabled else None,
+    }
+    return GatewayManager(**manager_kwargs)
 
 
 def build_agent_framework(

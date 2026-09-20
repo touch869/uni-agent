@@ -46,6 +46,13 @@ class GatewayActorConfig:
             independent concurrent sampling of identical requests.
         task_metrics_mode: Local Task Metrics mode. ``off`` preserves the legacy
             path; ``shadow`` and ``primary`` enable local fact projection.
+        direct_state_sync_enabled: Whether Gateway lifecycle state is mirrored to
+            the Router through the recoverable Direct path.
+        direct_state_sync_max_queue_events: Maximum pending lifecycle events per Gateway source.
+        direct_state_sync_max_queue_bytes: Maximum pending lifecycle bytes per Gateway source.
+        direct_state_sync_max_retries: Consecutive delivery attempts before the view becomes stale.
+        direct_state_sync_retry_backoff_s: Delay between retryable delivery attempts.
+        direct_state_sync_max_terminal_entities: Bounded terminal-session snapshot retention.
     """
 
     tokenizer: Any
@@ -64,6 +71,12 @@ class GatewayActorConfig:
     enable_last_assistant_rollback: bool = True
     coalesce_reserved_exact_requests: bool = True
     task_metrics_mode: str = "off"
+    direct_state_sync_enabled: bool = False
+    direct_state_sync_max_queue_events: int = 1024
+    direct_state_sync_max_queue_bytes: int = 1024 * 1024
+    direct_state_sync_max_retries: int = 3
+    direct_state_sync_retry_backoff_s: float = 0.01
+    direct_state_sync_max_terminal_entities: int = 4096
 
     def __post_init__(self) -> None:
         if type(self.enable_tool_parser_cache) is not bool:
@@ -88,6 +101,20 @@ class GatewayActorConfig:
             raise ValueError(
                 f"task_metrics_mode must be one of 'off', 'shadow', or 'primary', got {self.task_metrics_mode!r}"
             )
+        if type(self.direct_state_sync_enabled) is not bool:
+            raise ValueError(
+                f"direct_state_sync_enabled must be a bool, got {type(self.direct_state_sync_enabled).__name__}"
+            )
+        if self.direct_state_sync_max_queue_events <= 0:
+            raise ValueError("direct_state_sync_max_queue_events must be positive")
+        if self.direct_state_sync_max_queue_bytes <= 0:
+            raise ValueError("direct_state_sync_max_queue_bytes must be positive")
+        if self.direct_state_sync_max_retries <= 0:
+            raise ValueError("direct_state_sync_max_retries must be positive")
+        if self.direct_state_sync_retry_backoff_s < 0:
+            raise ValueError("direct_state_sync_retry_backoff_s must be non-negative")
+        if self.direct_state_sync_max_terminal_entities <= 0:
+            raise ValueError("direct_state_sync_max_terminal_entities must be positive")
         if self.prompt_length is not None and self.prompt_length <= 0:
             raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")
         if self.response_length is not None and self.response_length <= 0:

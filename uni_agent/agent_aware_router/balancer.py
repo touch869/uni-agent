@@ -25,8 +25,24 @@ import httpx
 import ray
 from omegaconf import DictConfig, OmegaConf
 
+from uni_agent.events import (
+    GATEWAY_SESSION_DIRECT_SUBSCRIPTION,
+    SESSION_CLOSED,
+    SESSION_OPENED,
+    DeliveryMode,
+    DirectAck,
+    DirectAckStatus,
+    DirectEventEndpoint,
+    DirectStateBatch,
+    LocalEventBus,
+    Scope,
+    SnapshotAndCursor,
+    SubscriptionSpec,
+)
+
 from .collectors import CollectorManager
 from .config import KVCAwareConfig
+from .session_state import GatewaySessionStateProjector
 from .store import DataStore
 from .strategies import (
     ReplicaInfo,
@@ -85,7 +101,67 @@ class KVCAwareBalancer:
             "on_servers_removed": [],
         }
         self._store = DataStore()
+        self._direct_event_bus: LocalEventBus | None = None
+        self._direct_session_projector: GatewaySessionStateProjector | None = None
+        self._direct_session_endpoint: DirectEventEndpoint | None = None
         self._init_provider()
+
+    def _ensure_direct_session_endpoint(self) -> DirectEventEndpoint:
+        endpoint = self._direct_session_endpoint
+        if endpoint is not None:
+            return endpoint
+        bus = LocalEventBus()
+        projector = GatewaySessionStateProjector()
+        bus.subscribe(
+            SubscriptionSpec(
+                subscription_id=GATEWAY_SESSION_DIRECT_SUBSCRIPTION,
+                event_types=(SESSION_OPENED, SESSION_CLOSED),
+                scope=Scope.DIRECT,
+                delivery=DeliveryMode.STATE_SYNC,
+            ),
+            projector.apply,
+        )
+        endpoint = DirectEventEndpoint(bus, snapshot_installer=projector.install_snapshot)
+        self._direct_event_bus = bus
+        self._direct_session_projector = projector
+        self._direct_session_endpoint = endpoint
+        return endpoint
+
+    def install_direct_snapshot(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Install one authoritative Gateway session snapshot in shadow state."""
+        try:
+            parsed = SnapshotAndCursor.from_dict(request)
+        except (KeyError, TypeError, ValueError) as exc:
+            return self._invalid_direct_request_ack(request, exc)
+        return self._ensure_direct_session_endpoint().install_snapshot(parsed).to_dict()
+
+    def receive_direct_events(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Apply one contiguous Direct batch and return an applied ACK."""
+        try:
+            parsed = DirectStateBatch.from_dict(batch)
+        except (KeyError, TypeError, ValueError) as exc:
+            return self._invalid_direct_request_ack(batch, exc)
+        return self._ensure_direct_session_endpoint().receive_events(parsed).to_dict()
+
+    @staticmethod
+    def _invalid_direct_request_ack(request: dict[str, Any], error: Exception) -> dict[str, Any]:
+        return DirectAck(
+            subscription_id=str(request.get("subscription_id") or "invalid"),
+            stream_epoch=str(request.get("stream_epoch") or "invalid"),
+            contiguous_cursor=0,
+            status=DirectAckStatus.RESYNC_REQUIRED,
+            reason=f"invalid Direct DTO: {type(error).__name__}",
+        ).to_dict()
+
+    def get_direct_session_shadow_status(self) -> dict[str, Any]:
+        """Return shadow state and transport health without affecting routing."""
+        if self._direct_session_projector is None or self._direct_session_endpoint is None:
+            return {"enabled": False, "mode": "shadow", "current": [], "terminal": [], "streams": []}
+        return {
+            "enabled": True,
+            **self._direct_session_projector.status(),
+            "streams": list(self._direct_session_endpoint.status()),
+        }
 
     def _fetch_rollout_config(self) -> Any | None:
         """Return the first available rollout config."""
