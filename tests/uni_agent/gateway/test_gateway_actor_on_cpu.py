@@ -1435,6 +1435,31 @@ async def test_gateway_actor_metrics_include_failed_request_without_partial_traj
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+async def test_gateway_actor_abort_result_preserves_metrics_without_trajectories():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode="primary"),
+        SequencedBackend([]),
+    )
+    actor._server_base_url = "http://gateway.local"
+    await actor.create_session("aborted-session")
+
+    finalization = await actor.abort_session_result("aborted-session")
+
+    assert finalization.trajectories == []
+    assert finalization.metrics_fragment is not None
+    assert finalization.metrics_fragment.complete
+    assert finalization.metrics_fragment.episode_id == "aborted-session"
+    assert finalization.metrics_fragment.metrics == {}
+    assert await actor.abort_session("aborted-session") is None
+    await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_gateway_actor_metrics_do_not_swallow_request_cancellation():
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor

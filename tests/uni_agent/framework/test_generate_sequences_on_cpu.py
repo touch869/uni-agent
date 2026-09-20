@@ -131,6 +131,7 @@ async def _build_framework_with_agent_runners(
     trajectory_postprocessor_fqn: str | None = None,
     trajectory_postprocessor_kwargs: object | None = None,
     reward_config: dict[str, object] | None = None,
+    task_metrics_mode: str | None = None,
 ):
     from omegaconf import OmegaConf
 
@@ -144,6 +145,8 @@ async def _build_framework_with_agent_runners(
         agent_framework_cfg["trajectory_postprocessor_fqn"] = trajectory_postprocessor_fqn
     if trajectory_postprocessor_kwargs is not None:
         agent_framework_cfg["trajectory_postprocessor_kwargs"] = trajectory_postprocessor_kwargs
+    if task_metrics_mode is not None:
+        agent_framework_cfg["collectors"] = {"task_metrics": {"mode": task_metrics_mode}}
 
     config_dict: dict[str, object] = {
         "actor_rollout_ref": {
@@ -515,6 +518,22 @@ class _MetricsGatewayManager(_FakeGatewayManager):
         return SessionFinalizationResult(
             trajectories=self._lookup(session_id),
             metrics_fragment=self._metrics_fragment,
+        )
+
+
+class _PerSessionMetricsGatewayManager(_FakeGatewayManager):
+    async def finalize_session_result(self, session_id: str) -> SessionFinalizationResult:
+        self.finalized_sessions.append(session_id)
+        return SessionFinalizationResult(
+            trajectories=self._lookup(session_id),
+            metrics_fragment=_metrics_fragment(session_id),
+        )
+
+    async def abort_session_result(self, session_id: str) -> SessionFinalizationResult:
+        self.aborted_sessions.append(session_id)
+        return SessionFinalizationResult(
+            trajectories=[],
+            metrics_fragment=_metrics_fragment(session_id),
         )
 
 
@@ -1869,6 +1888,100 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
     assert fake_tq.puts == [
         {"key": "uid-0", "partition_id": "val", "tag": {"status": status}} for status in ("running", "failure")
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_retains_fragment_when_postprocessing_drops_trajectory(fake_tq):
+    runtime = _PerSessionMetricsGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        trajectory_postprocessor_fqn=f"{__name__}._empty_trajectory_postprocessor",
+        task_metrics_mode="primary",
+    )
+
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert fake_tq.puts[-1]["tag"]["status"] == "failure"
+    assert summary["episode_count"] == 1
+    assert summary["empty_episodes"] == 1
+    assert summary["failed_episodes"] == 0
+    assert summary["fragment_count"] == 1
+    assert summary["complete"] is True
+    assert summary["metrics"]["gateway.requests"]["sum"] == 2
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_retains_abort_fragment_for_failed_episode(fake_tq):
+    async def failing_runner(**kwargs):
+        raise RuntimeError("runner failed")
+
+    runtime = _PerSessionMetricsGatewayManager({})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(failing_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="primary",
+    )
+
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert summary["failed_episodes"] == 1
+    assert summary["fragment_count"] == 1
+    assert summary["complete"] is True
+    assert len(runtime.aborted_sessions) == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_marks_legacy_manager_fragment_missing(fake_tq):
+    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="primary",
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert fake_tq.puts[-1]["tag"]["status"] == "finished"
+    assert summary["successful_episodes"] == 1
+    assert summary["fragment_count"] == 0
+    assert summary["complete"] is False
+    assert summary["incomplete_reasons"][0].startswith("missing metrics fragment for episode ")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_uses_legacy_abort_fallback(fake_tq):
+    async def failing_runner(**kwargs):
+        raise RuntimeError("legacy runner failed")
+
+    runtime = _FakeGatewayManager({})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(failing_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="primary",
+    )
+
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert summary["failed_episodes"] == 1
+    assert summary["fragment_count"] == 0
+    assert summary["complete"] is False
+    assert len(runtime.aborted_sessions) == 1
 
 
 @pytest.mark.cpu

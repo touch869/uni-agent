@@ -162,3 +162,26 @@
 - `plannings/collectors/phase0-baseline-and-contracts.md`
 - `/home/hgq/workspace/aicoder/research/autoresearch/agenticrl/llm-router/04_design/collectors/event-pubsub-detailed-design.md`
 - Existing candidate implementation under `uni_agent/events/`, `uni_agent/metrics/`, Gateway, Manager, and Framework
+
+## 2026-09-20 — Phase 5 Recovery
+
+- The formal design assigns final fragment merging to Framework after trajectory selection and postprocessing; it explicitly requires zero-trajectory and failed episodes to reach prompt summary so the failure denominator is retained.
+- Phase 5 is a closure slice rather than a new transport or ownership phase. Direct, Global, Router, and Admission boundaries established in Phases 2-4 remain unchanged.
+- Compatibility cleanup is evidence-gated: remove an adapter only when in-repository callers and focused mixed-version tests demonstrate parity; preserve public Gateway list-return behavior where it remains a supported boundary.
+- The clean phase boundary is the existing Phase 4 commit `79c7abc`; unrelated `verl`, `.planning/`, and `working/` state is excluded from Phase 5.
+- Framework currently carries a Gateway fragment only by attaching it to the last retained trajectory. If selection or postprocessing yields an empty list, `_run_agent_episode()` returns no fragment and `_run_prompt_rollouts()` records only an `empty trajectories` string.
+- Prompt terminal state is currently a bare TransferQueue tag containing only `status=finished|failure`; batch logs keep aggregate counts but there is no per-prompt summary containing episode outcomes or available fragments.
+- The existing `finalize_session_result` feature check is the necessary mixed-version adapter: an older GatewayManager returns `list[Trajectory]`, while the current manager returns `SessionFinalizationResult`. Phase 5 should test both paths and retain the public list-returning Gateway boundary.
+- A Framework-internal episode outcome can preserve trajectories, fragment, completion state, and bounded failure information through selection/postprocessing without changing public Gateway DTOs or event transports.
+- Gateway already produces complete fragments for zero-request, failed-request, and cancelled-request sessions when they are finalized. The current abort path instead discards projector state, so Framework runner failures cannot retain otherwise available observations.
+- Abort collection needs a compatibility-preserving internal result path: keep `abort_session()` behavior for existing callers and let current Framework consume an additive result method when present, with a fallback to the legacy abort method.
+- Prompt aggregation must retain one logical contribution per fragment ID at the highest revision and preserve missing/incomplete state. Numeric reduction must first reduce each episode/session, then aggregate sessions, rather than weighting prompts by generation count.
+- `PromptMetricsSummary` is gated by `collectors.task_metrics.mode`; `off` keeps the existing prompt terminal tag byte-for-byte, while `shadow` and `primary` record bounded outcome counts, fragment count, completeness, and reduced metrics.
+- Prompt reduction uses each fragment metric's scalar `value` as one episode contribution. This preserves equal episode weighting even when fragments contain different raw observation counts.
+- Duplicate episode observations and fragment revisions are idempotent; the highest revision replaces an older fragment, conflicting equal revisions or aggregation types make the summary incomplete instead of guessing.
+- The additive `abort_session_result()` method returns observations captured before failure, while `abort_session()` continues returning `None` and `finalize_session()` continues returning `list[Trajectory]`.
+- Compatibility inventory found no adapter that is both expired and safe to remove: public list-return finalization, Framework feature detection, and legacy `errors` DTO parsing all still have named mixed-version purposes.
+- `GatewayTaskMetricsProjector.discard_session()` no longer has an in-repository caller after abort fragments became observable, but the projector class is publicly exported. Remove it only after an external API/deprecation review, not from absence of local references alone.
+- veRL replay-buffer synchronization reads the existing `status` key and otherwise preserves or ignores additional tag metadata. The added `agent_metrics_summary` does not enter trajectory tensors or alter terminal-group state transitions.
+- The exact compatible Phase 0 suite completed faster after Phase 5 than in the pre-change run. Enabled prompt aggregation for four episodes with two metrics each measured 19.264-19.434 us median and 60.912-87.766 us P99 across isolated 20k-sample batches.
+- Phase 5 changes no Router, Direct, Global, or Admission hot path. Their focused recovery/isolation regression passed, and the previously recorded Phase 1-4 performance evidence remains applicable.

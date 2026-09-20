@@ -8,10 +8,10 @@ Incrementally implement the approved collectors event-pubsub design while preser
 
 ### Phase 5: Final Migration and Cleanup
 
-- [ ] Add prompt-level aggregation for empty and failed episodes
-- [ ] Validate mixed-version behavior, failure recovery, and performance budgets
-- [ ] Remove expired compatibility paths only after parity evidence is accepted
-- **Status:** pending
+- [x] Add prompt-level aggregation for empty and failed episodes
+- [x] Validate mixed-version behavior, failure recovery, and performance budgets
+- [x] Audit compatibility paths; retain those whose removal criteria are not met
+- **Status:** complete
 
 ## Completed Phases
 
@@ -90,6 +90,14 @@ Incrementally implement the approved collectors event-pubsub design while preser
 - Admission state is bounded and explicitly observe-only; it owns no capacity mutation, Grant, Hold, queue, or scheduling decision.
 - Existing Inflight, KV, Metrics, Direct, and Global ownership remains unchanged, and the final focused/static regression suite passes.
 
+## Phase 5 Exit Criteria
+
+- Prompt summaries retain episode outcomes and available metrics even when an episode yields no trajectory or all sessions fail; missing observations remain explicit rather than becoming zero.
+- Fragment merging is idempotent by fragment identity and revision, and mixed legacy/current results do not double-count metrics or drop failure denominators.
+- Recovery and shutdown paths preserve bounded queues, explicit incompleteness, and the ownership boundaries established in Phases 1-4.
+- Compatibility adapters are removed only where focused parity tests prove all in-repository callers have migrated; externally meaningful public return contracts remain stable.
+- Focused compatibility, failure-recovery, cross-phase regression, performance, formatting, lint, compile, and diff checks pass, subject only to recorded baseline dependency blockers.
+
 ## Guardrails
 
 - Implement vertical slices; avoid broad package-by-package scaffolding.
@@ -122,3 +130,5 @@ Incrementally implement the approved collectors event-pubsub design while preser
 | End-to-end test compared non-atomic broker and Reporter status snapshots too early | Poll the full cross-Actor predicate; do not imply runtime status is a transaction |
 | Event-family config wiring left one unused Gateway import | Remove it and rerun scoped lint |
 | One resumable test wait was submitted with malformed tool syntax | Reissued the wait against the same live session and retained the successful final result |
+| Phase 5 baseline collection could not import `verl.workers.rollout.replica` from the user-modified submodule | Preserve `verl` and rerun against the previously recorded read-only compatible veRL export |
+| Phase 5 compatibility baseline reproduced the known Loguru stdout-vs-`caplog` failure | Classify the exact node as an existing baseline defect and require the other 31 compatibility tests plus new Phase 5 coverage to pass |

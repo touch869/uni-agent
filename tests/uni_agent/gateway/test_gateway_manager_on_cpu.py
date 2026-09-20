@@ -104,6 +104,37 @@ async def test_gateway_manager_finalization_result_preserves_legacy_list_contrac
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+async def test_gateway_manager_abort_result_preserves_legacy_none_contract():
+    from uni_agent.gateway.manager import GatewayManager
+    from uni_agent.gateway.session import SessionFinalizationResult
+
+    finalization = SessionFinalizationResult(trajectories=[], metrics_fragment=None)
+
+    async def abort(session_id: str):
+        assert session_id in {"new-contract", "legacy-contract"}
+        return finalization
+
+    class _AbortGateway:
+        abort_session_result = _FakeRemoteMethod(abort)
+
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [_AbortGateway()]
+    manager.gateway_count = 1
+    manager.active_sessions_per_gateway = [2]
+    manager._session_to_gateway_index = {"new-contract": 0, "legacy-contract": 0}
+
+    result = await manager.abort_session_result("new-contract")
+    legacy_result = await manager.abort_session("legacy-contract")
+
+    assert result is finalization
+    assert legacy_result is None
+    assert manager.active_sessions_per_gateway == [0]
+    assert manager._session_to_gateway_index == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_gateway_manager_closes_global_runtime_when_gateway_shutdown_fails():
     from uni_agent.gateway.manager import GatewayManager
 

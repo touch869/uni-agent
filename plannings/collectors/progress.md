@@ -1,5 +1,63 @@
 # Collectors Implementation Progress
 
+## 2026-09-20 — Phase 5
+
+### Status
+
+- Phase: Final Migration and Cleanup
+- State: complete
+
+### Actions
+
+- Recovered the user-selected `plannings/collectors/` plan and confirmed Phases 1-4 are complete in separate commits.
+- Preserved unrelated `verl`, `.planning/`, and `working/` state; Phase 5 starts from `79c7abc`.
+- Scoped Phase 5 to Framework prompt aggregation, mixed-version and recovery validation, evidence-gated compatibility cleanup, and final performance/regression checks.
+- Added explicit exit criteria requiring empty/failed episode retention, idempotent fragment merging, stable public contracts, and unchanged transport/ownership boundaries.
+- Audited Framework finalization and prompt persistence. Confirmed that empty postprocessing currently discards an otherwise available Gateway fragment and that prompt terminal tags contain no episode summary.
+- Chose the existing prompt TransferQueue terminal tag as the persistence boundary and a Framework-internal episode outcome as the smallest implementation seam; public Gateway return types remain unchanged.
+- Audited Gateway failure finalization: normal finalization preserves empty/failed request metrics, while abort currently discards projector state. Phase 5 will add an additive abort-result seam with a legacy fallback.
+- Added bounded prompt metric models and equal-episode aggregation with fragment revision replacement, explicit incompleteness, and pure DTO serialization.
+- Added Gateway abort-result collection without changing the legacy `None` return contract, then wired Framework to use the additive method with a legacy fallback.
+- Added Framework prompt terminal summaries for enabled Task Metrics modes while preserving the exact disabled-path tag.
+- Audited compatibility adapters and retained each externally meaningful path. No adapter met the evidence threshold for removal; the unused projector discard method now has an explicit external-review removal criterion.
+- Generalized episode observations to hold multiple source fragments so later Runner/Framework projectors can join the same prompt reducer without changing its public summary shape.
+- Completed the final implementation review: prompt summaries retain empty/failed denominators, missing fragments remain explicit, and no Phase 2-4 transport or ownership boundary changed.
+- Phase 5 is ready for its own commit on top of the four existing phase commits.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Selected plan root | `plannings/collectors/` |
+| Phase 5 status | in progress |
+| Unrelated worktree changes | present; preserved |
+| Prompt aggregation and Gateway abort focused tests | 6 passed; only the Ray deprecation warning |
+| Framework empty, failed, and mixed-version summary tests | 3 passed; only the Ray deprecation warning |
+| Expanded metrics, Framework, and GatewayManager regression | 86 passed; two recorded baseline failures kept separate |
+| Compatible metrics, Framework, and GatewayManager regression after multi-source refactor | 84 passed, 6 exact baseline nodes deselected; only known Ray warnings |
+| Cross-phase Direct, Global, local bus, Router, Admission, and metrics recovery regression | 77 passed; only known Ray warnings |
+| Exact compatible Phase 0 suite after Phase 5 | 31 passed in 26.45 seconds; external wall time 30.47 seconds versus the pre-change 31.02-second pytest run |
+| First enabled prompt reducer benchmark | median 17.072-21.871 us for four episodes and two metrics each; post-Ray P95/P99 drifted upward, so an isolated rerun is required |
+| Isolated enabled prompt reducer benchmark | median 19.264-19.434 us, P95 34.785-47.587 us, P99 60.912-87.766 us across three 20k samples |
+| Framework prompt summary tests including legacy abort fallback | 4 passed; only the known Ray deprecation warning |
+| Full Gateway Actor regression | 67 passed; six known `merge_context_tokens` failures and two known stdout-vs-`caplog` failures |
+| Final scoped Ruff, format, compileall, and diff checks | passed |
+| Final scope audit | only Phase 5 metrics, Framework, Gateway, tests, and `plannings/collectors/` changed; unrelated dirty state preserved |
+
+### Errors
+
+| Error | Resolution |
+|---|---|
+| The planning hook reported multiple automatic plans without `PLAN_ID` | Pin this task operationally to the user-selected `plannings/collectors/`; do not recover or modify another plan |
+| The first Phase 5 compatibility baseline stopped during collection because the user-modified veRL tree lacks `verl.workers.rollout.replica` | Keep the submodule untouched and rerun with the existing read-only compatible veRL export on `PYTHONPATH` |
+| The compatible baseline ran 32 tests and reproduced the known `test_generate_sequences_reports_unfinished_episode_count` stdout-vs-`caplog` failure | Treat this exact node as a baseline defect; 31 other tests passed in 31.02 seconds |
+| The first Framework test patch addressed the same file in two separate patch operations and was rejected atomically | Merge the edits into one file operation before retrying; no partial test change was written |
+| Initial focused command passed 3 Framework summary tests but Ruff reported import ordering in the two new metrics modules; the shared `-k` expression also deselected metrics/Gateway nodes | Apply scoped import formatting, then run each focused group without a cross-file `-k` filter |
+| A later combined command repeated the cross-file `-k` filtering mistake after the multi-fragment refactor | Stop combining filtered Framework selection with other paths; run pure metrics/Gateway tests in a separate invocation |
+| Importing TransferQueue helpers directly from the user-modified `verl` tree failed because it also lacks `verl.utils.tensordict_utils` | Preserve the submodule and inspect its replay-buffer source statically; runtime tests continue against the compatible read-only export |
+| `check-complete.sh` did not treat `PWF_PLAN_ROOT=plannings/collectors` as a named-plan root | Run the completion check from inside the user-selected legacy plan directory instead of allowing fallback to another plan |
+| Expanded metrics/Framework/Manager regression reproduced the second known stdout-vs-`caplog` failure and the known veRL continuation-token HTTP 500 | Keep both exact baseline nodes separate; 86 compatible tests passed |
+
 ## 2026-09-20 — Phase 4
 
 ### Status

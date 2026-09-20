@@ -133,10 +133,15 @@ class GatewayManager:
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a routed session on its owning actor and release the route."""
+        await self.abort_session_result(session_id)
+
+    async def abort_session_result(self, session_id: str) -> SessionFinalizationResult:
+        """Abort a routed session and return metrics observed before failure."""
         gateway, gateway_index = self._get_gateway(session_id)
-        await gateway.abort_session.remote(session_id=session_id)
+        result = await gateway.abort_session_result.remote(session_id=session_id)
         self._session_to_gateway_index.pop(session_id, None)
         self.active_sessions_per_gateway[gateway_index] -= 1
+        return result
 
     async def shutdown(self) -> None:
         """Stop owned gateway actors and clear routing state."""

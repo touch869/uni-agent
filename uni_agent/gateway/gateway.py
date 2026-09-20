@@ -584,14 +584,22 @@ class _GatewayActor:
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a session and remove it from the actor if it still exists."""
+        await self.abort_session_result(session_id)
+
+    async def abort_session_result(self, session_id: str) -> SessionFinalizationResult:
+        """Abort a session while preserving any metrics observed before failure."""
         session = self._sessions.get(session_id)
         if session is None:
-            return  # Already finalized or aborted — treat as idempotent.
+            return SessionFinalizationResult(trajectories=[])
         await session.abort()
         self._publish_session_event(SESSION_CLOSED, session.event_context, revision=2, close_reason="aborted")
-        if self._task_metrics_projector is not None:
-            self._task_metrics_projector.discard_session(session_id)
+        metrics_fragment = (
+            self._task_metrics_projector.finalize_session(session_id)
+            if self._task_metrics_projector is not None
+            else None
+        )
         self._sessions.pop(session_id, None)
+        return SessionFinalizationResult(trajectories=[], metrics_fragment=metrics_fragment)
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:
         """Return a snapshot of a live session's state."""
