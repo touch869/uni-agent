@@ -237,3 +237,13 @@
 - The Balancer fail-closed check generalized to `_unhealthy_router_projector()` iterates sticky then inflight and only acts in projector mode; the legacy hot path keeps a single mode comparison, and the paired benchmark shows no repeatable legacy regression.
 - The correct local test environment is the `py311` conda env (`/home/hgq/software/miniconda3/envs/py311`, Python 3.11.14 with `pytest-asyncio`); `agentic-py31114` lacks `pytest-asyncio` and fails async collection in events/Gateway suites on clean HEAD too.
 - Pre-existing-failure triage by stashing the working tree and rerunning the identical command on clean HEAD cleanly separated environment defects from Phase 7 regressions before any fix was attempted.
+
+## 2026-09-21 — Phase 8 Rebase Integration
+
+- The new base `092fdb0` replaces the old repeated rollout-config reads with one `_fetch_rollout_config()` call and adds parallel HTTP discovery of vLLM KV-event sources.
+- Phase 4's Router mode resolution does not require a second Ray RPC. Passing the already fetched rollout configuration into `_resolve_router_state_mode()` preserves both the new baseline and the ownership-mode contract.
+- Phase 2's Direct methods are independent of the rollout-config refactor; the conflict was positional rather than semantic.
+- Phase 4's Router health and admission behavior composes with the new base's structured `debug` route log. Production facts still publish only after synchronous commits.
+- Phase 7's `_unhealthy_router_projector()` is the final health boundary because it covers both Sticky and Inflight projectors; retaining the older Sticky-only check would regress fail-closed behavior.
+- The upstream strategy now requires both sequence and token capacity values. The shared test helper must therefore pass the default `2048` token budget when overriding only `max_num_seqs`.
+- Rebase conflict validation must use the existing read-only compatible veRL export because the preserved user submodule lacks `verl.utils.rollout_trace`.

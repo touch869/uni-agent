@@ -10,6 +10,15 @@ None — all phases complete.
 
 ## Completed Phases
 
+### Phase 8: Rebase Integration
+
+- [x] Recover the pre-rebase collectors plan and inventory every conflicted file and commit
+- [x] Preserve the new vLLM endpoint-discovery baseline while replaying Direct and Router ownership changes
+- [x] Resolve Phase 2, Phase 4, and Phase 7 conflicts without modifying unrelated user state
+- [x] Run focused and cross-phase regression, static, history, and worktree checks
+- [x] Record the final rewritten commits and complete the rebase integration phase
+- **Status:** complete
+
 ### Phase 7: Router Inflight Ownership Migration
 
 - [x] Audit the inflight input family (`InflightParser` → delta `MetricsUpdate` → `Collector._write_metrics_update`) against the frozen single-writer contract
@@ -134,6 +143,14 @@ None — all phases complete.
 - Existing Sticky, KV, polled-metrics, Direct, Global, and admission ownership remains unchanged; the Balancer's command-side `_inflight` ledger stays the capacity-fact source.
 - Focused Phase 7 tests, cross-phase regression, formatting, lint, compile, diff, and performance checks pass, subject only to recorded baseline dependency blockers.
 
+## Phase 8 Exit Criteria
+
+- The seven collector phase commits replay cleanly on top of `092fdb0` and retain their original phase boundaries.
+- Direct, Global, Router, Admission, prompt-summary, and trainer-export contracts remain intact after resolving conflicts with the new Router endpoint-discovery baseline.
+- Rollout configuration is fetched once and reused for Router overrides, capacity, and Router ownership mode selection.
+- No conflict markers, rebase metadata, or uncommitted collector code remains; unrelated `verl`, `.planning/`, and `working/` state stays untouched.
+- Focused and cross-phase tests, Ruff, format, compile, diff, and history checks pass, subject only to recorded dependency blockers.
+
 ## Guardrails
 
 - Implement vertical slices; avoid broad package-by-package scaffolding.
@@ -174,3 +191,7 @@ None — all phases complete.
 | Phase 6 Framework test collection hit the recorded missing `verl.workers.rollout.replica` module in the user-dirty submodule | Rerun the focused Framework coverage with the existing read-only compatible veRL export; do not modify `verl` |
 | The first trainer-safe key patch did not match the formatter-adjusted reducer block and was rejected atomically | Re-read the narrow reducer/test sections and apply the same design against the current formatted text |
 | A Phase 6 Ruff command accidentally included a Markdown document and produced irrelevant Python syntax errors | Restrict Ruff to Python files; validate the Markdown through diff/fence checks instead |
+| `plannings/collectors/` was absent at the Phase 2 rebase stop because its introducing commit had not replayed yet | Read the selected plan from `ORIG_HEAD`; wait for Phase 4 to restore the tracked files before recording Phase 8 |
+| The first combined Phase 4 conflict patch missed the exact conflict context | The patch was rejected atomically; split it into smaller import, constructor, configuration, routing, and helper edits |
+| Phase 4 tests could not import `verl.utils.rollout_trace` from the user-modified submodule | Preserve `verl` and rerun the same tests against the existing read-only compatible veRL export |
+| Two parallel final test commands exceeded the outer wait and their terminal session ids were not retained | Waited for those processes to finish, then reran each once with resumable output capture and recorded the complete results |

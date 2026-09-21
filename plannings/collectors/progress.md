@@ -414,3 +414,47 @@
 | Ruff reported one overlong line in the new projector code | Applied the repository formatter to the two affected files and reran lint, format, and the focused suites |
 | A sed-based row-key rename invalidated a pending in-context edit, which was then rejected atomically | Re-read the file and re-applied the same design against the current text |
 | Router ray-integration collection still fails on the export's missing `verl.workers.rollout.router` | Recorded Phase 2 baseline blocker; the dedicated Gateway-to-Ray Direct/Global integrations remain the cross-Actor evidence |
+
+## 2026-09-21 — Phase 8
+
+### Status
+
+- Phase: Rebase Integration
+- State: complete
+
+### Actions
+
+- Recovered the selected plan from `ORIG_HEAD` while the early rebase commits did not yet contain `plannings/collectors/`.
+- Confirmed the rebase target is `092fdb0` and the seven collector commits retain their original order.
+- Resolved the Phase 2 conflict by keeping the new `_fetch_rollout_config()` baseline together with the Direct Endpoint, snapshot, and ACK methods.
+- Resolved the Phase 4 conflicts by fetching rollout configuration once and reusing it for Router overrides, capacity, and `router_state_mode` selection.
+- Preserved the new base's parallel vLLM KV-event endpoint discovery and structured Router logging.
+- Updated the Router test helper for the two-argument `set_capacity(max_num_seqs, max_num_batched_tokens)` contract.
+- Resolved the Phase 7 conflict by retaining the generalized Sticky/Inflight fail-closed health check.
+- Completed the interactive rebase; Phases 3, 5, and 6 replayed without conflicts.
+- Confirmed the seven phase commits remain ordered and based directly on `092fdb0`.
+- Completed the final worktree audit; only the three Phase 8 planning files plus preserved unrelated `verl`, `.planning/`, and `working/` state remained before the Phase 8 commit.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Phase 2 Direct shadow conflict check | 3 passed |
+| Phase 4 Router/Direct/new-baseline focused suite | 46 passed with the read-only compatible veRL export |
+| Phase 7 Router/Direct/new-baseline focused suite | 55 passed with the read-only compatible veRL export |
+| Full Router CPU/Level0 suite | 238 passed, 11 deselected; Ray integration file excluded per the recorded dependency blocker |
+| Cross-phase Events, Metrics, Admission, Direct, and Global suite | 73 passed |
+| Compatible Framework suite | 70 passed, 5 recorded logging-capture nodes deselected |
+| Conflict-file Ruff and compile checks | passed |
+| All 51 changed Python files | Ruff check and format check passed; `compileall` passed |
+| History and worktree checks | seven ordered collector commits over `092fdb0`; no conflict markers or rebase metadata; diff checks passed |
+| Interactive rebase | complete; branch restored to `collector` |
+
+### Errors
+
+| Error | Resolution |
+|---|---|
+| Selected planning files were not present at the Phase 2 stop | Read them from `ORIG_HEAD` and delayed plan updates until their introducing commit replayed |
+| First combined Phase 4 patch did not match one conflict block | The patch made no changes; split the resolution into bounded patches against the current text |
+| Direct Phase 4 test invocation failed during collection on missing `verl.utils.rollout_trace` | Re-ran unchanged tests with `/tmp/uni-agent-verl-phase0.UgGIt1` on `PYTHONPATH`; 46 passed |
+| Initial parallel final-test orchestration returned before two nested commands finished and did not expose their session ids | Waited for both processes to finish, then reran the commands with resumable session capture; 73 and 70 tests passed respectively |
